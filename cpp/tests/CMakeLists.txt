@@ -26,6 +26,16 @@ target_link_libraries(spsc_ring_test
     pthread
 )
 
+add_executable(order_book_test order_book_test.cpp)
+target_link_libraries(order_book_test
+  PRIVATE
+    oep_core
+    GTest::gtest
+    GTest::gtest_main
+    pthread
+)
+
 include(GoogleTest)
 gtest_discover_tests(slab_allocator_test)
 gtest_discover_tests(spsc_ring_test)
+gtest_discover_tests(order_book_test)
