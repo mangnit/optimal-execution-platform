@@ -1,0 +1,64 @@
+# Regression gate for the internal-clock hot path.
+#
+# Builds Release with -O3 -march=native (docs/architecture.md §7), runs the
+# full ctest suite, then executes the latency harness. The JSON benchmark
+# output and the rendered docs/latency_report.md are uploaded as artifacts so
+# future runs can be diffed against them for a p99 regression check.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test-bench:
+    name: Build, test, benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (Ninja, CMake, GCC C++20)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            cmake \
+            g++ \
+            python3
+          cmake --version
+          ninja --version
+          g++ --version
+
+      - name: Configure (Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOEP_BUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (ctest)
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Run latency benchmarks
+        run: scripts/run_benchmarks.sh
+
+      - name: Upload latency report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-report
+          path: docs/latency_report.md
+
+      - name: Upload benchmark JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-json
+          path: benchmarks/*.json
