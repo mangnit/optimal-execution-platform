@@ -32,3 +32,35 @@ option(OEP_BUILD_BENCHMARKS "Build the internal-clock latency benchmarks" ON)
 if(OEP_BUILD_BENCHMARKS)
   add_subdirectory(cpp/benchmarks)
 endif()
+
+# KDB+ IPC logger (task P2_kdb_ipc). Off by default so CI stays green without
+# k.h / c.o present and without a running q ticker plant. Turn on with
+# -DOEP_USE_KDB=ON once cpp/external/kdb/{k.h,c.o} are downloaded (see
+# the KX Systems kdb repository for the k.h/c.o downloads).
+option(OEP_USE_KDB "Build the real KDB+ IPC logger (requires cpp/external/kdb/{k.h,c.o})" OFF)
+if(OEP_USE_KDB)
+  set(OEP_KDB_C_OBJ "${CMAKE_SOURCE_DIR}/cpp/external/kdb/c.o")
+  set(OEP_KDB_HEADER "${CMAKE_SOURCE_DIR}/cpp/external/kdb/k.h")
+  if(NOT EXISTS "${OEP_KDB_C_OBJ}" OR NOT EXISTS "${OEP_KDB_HEADER}")
+    message(FATAL_ERROR
+      "OEP_USE_KDB=ON but cpp/external/kdb/{k.h,c.o} are missing. "
+      "See the KX Systems kdb repository for the k.h/c.o downloads.")
+  endif()
+
+  add_library(oep_kdb_ipc STATIC cpp/external/ipc_kdb_logger.cpp)
+  target_include_directories(oep_kdb_ipc
+    PUBLIC
+      ${CMAKE_SOURCE_DIR}/cpp
+    PRIVATE
+      ${CMAKE_SOURCE_DIR}/cpp/external/kdb
+  )
+  # `c.o` is the prebuilt KX Systems Linux 64-bit client object. Linking it as
+  # a plain object file works for GCC/Ninja; it pulls in libc symbols only.
+  target_link_libraries(oep_kdb_ipc
+    PUBLIC
+      oep_core
+      ${OEP_KDB_C_OBJ}
+      pthread
+  )
+  target_compile_definitions(oep_kdb_ipc PUBLIC OEP_USE_KDB=1 KXVER=3)
+endif()
