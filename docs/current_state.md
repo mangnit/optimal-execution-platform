@@ -1,9 +1,9 @@
 # Current State
 
 **Phase:** P2 – Event Loop & kdb+ logging (**relay + logger interface
-complete**). Remaining P2 work: wire the order-book fill/ack path to
-publish `TelemetryEvent`s into the SPSC ring, then swap the in-memory
-sink for a real `k.h` IPC logger.
++ order-book → SPSC wiring complete**). Remaining P2 work: swap the
+in-memory sink for a real `k.h` IPC logger and land `q/schema.q`
+pinned to the CSV header.
 
 **Completed:**
 - Workspace directory initialization.
@@ -141,6 +141,48 @@ sink for a real `k.h` IPC logger.
     a live producer). A real `IpcKdbLogger` slots in without touching
     the relay.
 
+- **Order-book → SPSC wiring / TelemetryPublisher**
+  (`cpp/exec/telemetry_publisher.hpp`):
+  - Templated on `Ring` and `ClockFn` so nothing about the ring capacity
+    or the timestamp source (TSC in production, monotone counter in
+    tests) leaks into the header. Wraps `OrderBook::AddLimit` and
+    `OrderBook::Cancel`; every hot-path outcome — one `Fill` event per
+    maker/taker pair, one `Ack` iff a residual actually rests, one
+    `Cancel` on successful cancel — is converted to a `TelemetryEvent`
+    and pushed via `SpscRing::TryPush`. Producer-side monotone
+    `sequence` is assigned at emit; `timestamp_ns` comes from the
+    injected clock.
+  - The `FillHandler` (already templated in P1) and a new templated
+    `OrderBook::Cancel(id, on_cancel)` overload let the publisher
+    observe `(id, side, price, residual qty)` *before* the slab
+    reclaims the node — captured by-reference lambdas inline through
+    the templated call sites, so the wired hot path has zero virtual
+    dispatch and zero allocation. The legacy `Cancel(id)→bool` is kept
+    as a thin default-callback wrapper so existing tests are unchanged.
+  - Drop-tolerant: `TryPush` failures are counted by the ring but not
+    retried on the hot path (§2 architecture rule — telemetry loss is
+    acceptable, hot-path jitter is not).
+  - 5 GoogleTests (`cpp/tests/system_integration_test.cpp`) pass under
+    `ctest` (48/48 total suite green). Coverage:
+    - End-to-end CSV tape verification through the full
+      `OrderBook → TelemetryPublisher → SpscRing → EventRelay →
+      InMemoryKdbLogger` pipeline (Ack + Fill + Ack-of-residual +
+      Cancel land in the logger in exactly the expected schema and
+      sequence order, zero drops).
+    - Pure aggressor emits only `Fill`, no `Ack` (no residual to rest).
+    - `Cancel` of an unknown id emits nothing and does not burn a
+      sequence number.
+    - **Zero-allocation guard for the wired hot path**: a 100 000-op
+      mixed workload through the publisher + ring produces zero global
+      `new`/`delete` deltas after warmup (relay deliberately not
+      started — the logger's mutex + string formatting live on the
+      external clock and are allowed to allocate).
+    - 2 000-order concurrent producer / relay-consumer run: strict
+      monotone sequence in the logged tape, zero SPSC drops.
+  - The existing `OrderBook.NoHotPathHeapTraffic` test still passes
+    unchanged, confirming the new `Cancel` overload did not regress
+    the order-book's zero-alloc guarantee.
+
 - **External-clock event relay** (`cpp/external/event_relay.hpp`):
   - Templated on the ring type; owns one dedicated consumer thread
     that polls `TryPop` and hands each event to the injected
@@ -187,15 +229,12 @@ sink for a real `k.h` IPC logger.
 **Bugs/Issues:** None.
 
 **Next Phase — P2 remaining work.**
-1. Wire the order-book fill/ack/cancel path to publish
-   `TelemetryEvent`s into a `SpscRing<TelemetryEvent, N>` (via a
-   templated publisher functor so the hot path keeps zero virtual
-   dispatch and zero allocation). Producer-side monotone `sequence`
-   assigned at emit; internal-clock `timestamp_ns` from the same TSC
-   path the benchmark harness uses.
-2. Swap `InMemoryKdbLogger` for a real `IpcKdbLogger` built on
+1. Swap `InMemoryKdbLogger` for a real `IpcKdbLogger` built on
    `k.h`: batched IPC frames on `Flush()`, wall-clock stamp added
    on landing so the tape carries both the internal (TSC) and
    external (wall) clocks per §P4 TCA replay.
-3. Land `q/schema.q` pinned to `kCsvHeader` so the tape ingest is
+2. Land `q/schema.q` pinned to `kCsvHeader` so the tape ingest is
    symmetric with the CSV sink used in CI.
+3. Plumb the production TSC clock (bench_util's calibrated
+   nanosecond source) into `TelemetryPublisher::ClockFn` at the
+   `sim_runner` / `live_loop` entry points once P3 lands.

@@ -44,8 +44,18 @@ target_link_libraries(relay_test
     pthread
 )
 
+add_executable(system_integration_test system_integration_test.cpp)
+target_link_libraries(system_integration_test
+  PRIVATE
+    oep_core
+    GTest::gtest
+    GTest::gtest_main
+    pthread
+)
+
 include(GoogleTest)
 gtest_discover_tests(slab_allocator_test)
 gtest_discover_tests(spsc_ring_test)
 gtest_discover_tests(order_book_test)
 gtest_discover_tests(relay_test)
+gtest_discover_tests(system_integration_test)

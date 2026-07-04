@@ -127,15 +127,29 @@ class OrderBook {
   // O(1) cancel: hash-table lookup + intrusive unlink + slab deallocate.
   // Returns false if the id is unknown (e.g. already fully filled or never
   // rested).
-  bool Cancel(OrderId id) {
+  //
+  // The templated overload notifies the caller of the resting state we are
+  // about to destroy *before* deallocation, so a telemetry publisher can
+  // emit a Cancel event carrying the correct (side, price, residual qty).
+  // `on_cancel` is invoked synchronously as
+  //   on_cancel(OrderId, Side, Price, Quantity)
+  // and templated to inline without virtual dispatch — same pattern as the
+  // FillHandler on AddLimit.
+  template <typename OnCancel>
+  bool Cancel(OrderId id, OnCancel&& on_cancel) {
     Order* o = LookupAndEraseId(id);
     if (o == nullptr) {
       return false;
     }
+    on_cancel(o->id, o->side, o->price, o->qty);
     LevelFIFO& lvl = LevelForSide(o->side, o->price);
     UnlinkFromLevel(lvl, o);
     slab_.Deallocate(o);
     return true;
+  }
+
+  bool Cancel(OrderId id) {
+    return Cancel(id, [](OrderId, Side, Price, Quantity) noexcept {});
   }
 
   // Observers. All O(active-empty-levels) in the worst case; for a healthy
