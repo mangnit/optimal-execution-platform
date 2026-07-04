@@ -1,9 +1,10 @@
 # Current State
 
-**Phase:** P2 – Event Loop & kdb+ logging (**relay + logger interface
-+ order-book → SPSC wiring complete**). Remaining P2 work: swap the
-in-memory sink for a real `k.h` IPC logger and land `q/schema.q`
-pinned to the CSV header.
+**Phase:** P2 – Event Loop & kdb+ logging — **COMPLETE (100%)**.
+Relay + logger interface, order-book → SPSC wiring, real `k.h` IPC
+logger, and `q/schema.q` pinned to the CSV header are all landed.
+Ready to open P3 (sim runner / live loop wiring the production TSC
+clock into `TelemetryPublisher::ClockFn`).
 
 **Completed:**
 - Workspace directory initialization.
@@ -214,6 +215,19 @@ pinned to the CSV header.
     producer/consumer (retrying producer, spin-mode relay) delivers
     every event in strict monotone sequence order.
 
+- **KDB+ ticker-plant schema** (`q/schema.q`):
+  - `trade` table pinned column-for-column to `kCsvHeader` and to the
+    mixed-list order that `IpcKdbLogger::SendBatchLocked` publishes:
+    `type` (symbol), `seq` / `ts_ns` / `order_id` / `counter_id` /
+    `price` / `qty` (long), `side` (symbol). `ts_ns` carries the
+    internal (TSC) clock; the wall-clock stamp is added on landing
+    via `.z.p` per §P4 TCA replay, so both clocks live on the tape.
+  - Standard kdb+ tick `.u.upd:{[t;x] t insert x}` handler makes the
+    script runnable standalone — a `q schema.q -p 5010` on the ticker
+    plant host is enough to smoke-test the C++ IPC frame end-to-end
+    without pulling in a full TP/RDB. The IpcKdbLogger already targets
+    `.u.upd[`trade; ...]` so wiring is symmetric.
+
 **Pending (deferred to later phases):**
 - `perf` cache/branch-miss numbers to sit alongside the p50/p99/p99.9 table
   (harness ready, needs a core-isolated Linux run — CI runner is shared
@@ -228,13 +242,14 @@ pinned to the CSV header.
 
 **Bugs/Issues:** None.
 
-**Next Phase — P2 remaining work.**
-1. Swap `InMemoryKdbLogger` for a real `IpcKdbLogger` built on
-   `k.h`: batched IPC frames on `Flush()`, wall-clock stamp added
-   on landing so the tape carries both the internal (TSC) and
-   external (wall) clocks per §P4 TCA replay.
-2. Land `q/schema.q` pinned to `kCsvHeader` so the tape ingest is
-   symmetric with the CSV sink used in CI.
-3. Plumb the production TSC clock (bench_util's calibrated
+**Next Phase — P3 (sim runner / live loop).**
+1. Plumb the production TSC clock (bench_util's calibrated
    nanosecond source) into `TelemetryPublisher::ClockFn` at the
-   `sim_runner` / `live_loop` entry points once P3 lands.
+   `sim_runner` / `live_loop` entry points.
+2. Stand up the sim runner: deterministic seeded fill-sequence
+   driver against `OrderBook + TelemetryPublisher`, replayed
+   through the relay into either the in-memory (CI) sink or the
+   real `IpcKdbLogger` when a `q schema.q` ticker plant is up.
+3. Wire the live loop's external gateway boundary onto the same
+   external clock the relay + kdb+ logger already occupy — no
+   FIX I/O may leak onto the hot path.
