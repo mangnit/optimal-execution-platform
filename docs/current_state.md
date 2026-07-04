@@ -1,7 +1,9 @@
 # Current State
 
-**Phase:** P1 – C++ core (**complete**). Ready to begin P2 – Event Loop &
-kdb+ logging.
+**Phase:** P2 – Event Loop & kdb+ logging (**relay + logger interface
+complete**). Remaining P2 work: wire the order-book fill/ack path to
+publish `TelemetryEvent`s into the SPSC ring, then swap the in-memory
+sink for a real `k.h` IPC logger.
 
 **Completed:**
 - Workspace directory initialization.
@@ -121,6 +123,55 @@ kdb+ logging.
     diffed against a committed baseline for a p99 regression check.
   - Committed as `6e3d69a` — closes out P1.
 
+- **KDB+ logger interface** (`cpp/external/kdb_logger.hpp`):
+  - `TelemetryEvent` POD (fill / cancel / ack discriminator, sequence,
+    internal-clock ns timestamp, order/counter ids, price, qty, side).
+    `static_assert`s pin trivially copyable / destructible so it can
+    ride the `SpscRing<TelemetryEvent, N>` unchanged. Factory
+    constructors (`Fill`, `Cancel`, `Ack`) keep the producer call
+    sites terse and keep the discriminator/field pair consistent.
+  - `kCsvHeader` constant (`type,seq,ts_ns,order_id,counter_id,price,
+    qty,side`) and a shared `FormatCsvRow()` free function so the
+    in-memory test sink and the eventual `k.h` IPC sink emit the same
+    tape schema — `q/schema.q` can pin against the same column order.
+  - Abstract `KdbLogger` base with `Log(const TelemetryEvent&)` and
+    `Flush()`. `InMemoryKdbLogger` supplies the CI/test implementation
+    (mutex-guarded `std::vector<std::string>` of CSV rows, snapshot
+    copy on read to avoid handing the relay thread's buffer out under
+    a live producer). A real `IpcKdbLogger` slots in without touching
+    the relay.
+
+- **External-clock event relay** (`cpp/external/event_relay.hpp`):
+  - Templated on the ring type; owns one dedicated consumer thread
+    that polls `TryPop` and hands each event to the injected
+    `KdbLogger&`. All I/O / allocation / dispatch stays on the
+    external clock; the producer side of the ring never blocks on
+    anything the relay does.
+  - Idempotent `Start()` / `Stop()` gated by `std::atomic<bool>`
+    flags with acquire/release ordering. `Stop()` sets
+    `stop_requested_`, and the consumer runs one final drain pass
+    *after* observing the flag so anything the producer landed
+    between the last drain and its stop signal is still logged
+    before `Flush()` and join. Destructor calls `Stop()`, so a
+    stack-scoped relay is always joined.
+  - Idle policy is a configurable `std::this_thread::sleep_for` on
+    empty (default 50 µs) — keeps CI CPU sane without introducing a
+    condition variable on the producer side. Tests drive the sleep
+    to zero for spin-mode or to 100 ms to prove the residual-drain
+    path.
+  - Racy `processed()` counter (relaxed atomic) for test assertions
+    and later §P4 TCA tape sanity checks.
+  - 6 GoogleTests (`cpp/tests/relay_test.cpp`) pass under `ctest`
+    (43/43 total suite green). Coverage: CSV row matches the pinned
+    schema for fill / cancel / ack; burst of 500 events drains in
+    strict FIFO order with `flush_count ≥ 1` and zero SPSC drops;
+    double-`Start()` / double-`Stop()` idempotent with no hang;
+    destructor stops cleanly without an explicit `Stop()` and still
+    drains queued events; `Stop()` drains residual elements when the
+    consumer is parked in its idle sleep; 20 000-event concurrent
+    producer/consumer (retrying producer, spin-mode relay) delivers
+    every event in strict monotone sequence order.
+
 **Pending (deferred to later phases):**
 - `perf` cache/branch-miss numbers to sit alongside the p50/p99/p99.9 table
   (harness ready, needs a core-isolated Linux run — CI runner is shared
@@ -135,12 +186,16 @@ kdb+ logging.
 
 **Bugs/Issues:** None.
 
-**Next Phase — P2: Event Loop & kdb+ logging.**
-1. Route order-book fills/acks through the SPSC ring to the external
-   (relay) clock. Internal clock stays lock-free and drop-on-full per
-   `docs/architecture.md` §2; the relay-side consumer owns all I/O.
-2. Build the external-clock event loop that drains the SPSC ring and
-   dispatches to sinks (kdb+ writer, FIX gateway stub, structured log).
-3. kdb+ tick-logger integration: schema for orders/fills/book snapshots,
-   batched IPC writes off the hot path, replay-friendly timestamps on
-   both the internal (TSC) and external (wall) clocks.
+**Next Phase — P2 remaining work.**
+1. Wire the order-book fill/ack/cancel path to publish
+   `TelemetryEvent`s into a `SpscRing<TelemetryEvent, N>` (via a
+   templated publisher functor so the hot path keeps zero virtual
+   dispatch and zero allocation). Producer-side monotone `sequence`
+   assigned at emit; internal-clock `timestamp_ns` from the same TSC
+   path the benchmark harness uses.
+2. Swap `InMemoryKdbLogger` for a real `IpcKdbLogger` built on
+   `k.h`: batched IPC frames on `Flush()`, wall-clock stamp added
+   on landing so the tape carries both the internal (TSC) and
+   external (wall) clocks per §P4 TCA replay.
+3. Land `q/schema.q` pinned to `kCsvHeader` so the tape ingest is
+   symmetric with the CSV sink used in CI.
