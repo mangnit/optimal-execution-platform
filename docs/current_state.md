@@ -1,6 +1,8 @@
 # Current State
 
-**Phase:** P1 – C++ core (in progress)
+**Phase:** P1 – C++ core (**complete**). Ready to begin P2 – Event Loop &
+kdb+ logging.
+
 **Completed:**
 - Workspace directory initialization.
 - Top-level CMake + Ninja build (`-Wall -Wextra -Wpedantic -Werror`, C++20,
@@ -109,23 +111,36 @@
     seeded-determinism replay — the same op sequence produces a
     byte-identical fill stream on two independent books.
 
-**Pending:**
+- **CI workflow** (`.github/workflows/ci.yml`):
+  - GitHub Actions job on `push`/`pull_request` to `main`. Installs
+    Ninja + CMake + GCC, configures Release with `-O3 -march=native` and
+    `-DOEP_BUILD_BENCHMARKS=ON`, builds, runs the full `ctest` suite
+    (`--output-on-failure`), then executes `scripts/run_benchmarks.sh`.
+  - Uploads `docs/latency_report.md` and `benchmarks/*.json` as
+    artifacts on every run (including failures) so future PRs can be
+    diffed against a committed baseline for a p99 regression check.
+  - Committed as `6e3d69a` — closes out P1.
+
+**Pending (deferred to later phases):**
 - `perf` cache/branch-miss numbers to sit alongside the p50/p99/p99.9 table
-  (harness ready, needs a core-isolated Linux run).
+  (harness ready, needs a core-isolated Linux run — CI runner is shared
+  hardware and not suitable for the tail).
 - HdrHistogram integration to replace the sort-in-memory percentile path
   when sample counts push past ~10^8.
-- CI (`.github/workflows/ci.yml`) with the benchmark-regression gate on top
-  of the JSON output the harness already produces.
-- Wire order-book state changes through the SPSC ring to the relay side.
+- Numerical p99 regression threshold on top of the CI artifacts (JSON is
+  already uploaded; a follow-up job can diff current vs baseline).
+- Re-take the latency baseline on a core-isolated Linux box (with
+  `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER`) and commit the
+  resulting `docs/latency_report.md` alongside the pinning notes.
 
 **Bugs/Issues:** None.
 
-**Next Tasks:**
+**Next Phase — P2: Event Loop & kdb+ logging.**
 1. Route order-book fills/acks through the SPSC ring to the external
-   (relay) clock.
-2. Add the CI workflow with the benchmark-regression gate (fails if p99 of
-   any tracked benchmark regresses beyond a threshold vs the committed
-   baseline JSON in `benchmarks/`).
-3. Re-take the latency baseline on a core-isolated Linux box (with
-   `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER`) and commit the
-   resulting `docs/latency_report.md` alongside the pinning notes.
+   (relay) clock. Internal clock stays lock-free and drop-on-full per
+   `docs/architecture.md` §2; the relay-side consumer owns all I/O.
+2. Build the external-clock event loop that drains the SPSC ring and
+   dispatches to sinks (kdb+ writer, FIX gateway stub, structured log).
+3. kdb+ tick-logger integration: schema for orders/fills/book snapshots,
+   batched IPC writes off the hot path, replay-friendly timestamps on
+   both the internal (TSC) and external (wall) clocks.
