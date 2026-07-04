@@ -42,6 +42,41 @@
     saturation (`produced == received + dropped`, strictly monotone
     delivery) and a retrying producer that must deliver every value in
     issue order.
+- **Latency benchmark harness** (`cpp/benchmarks/`):
+  - Google Benchmark integrated via `FetchContent` (tag v1.8.3), gated on
+    `-DOEP_BUILD_BENCHMARKS=ON` (default on). One executable per core
+    component keeps CI triage cheap and lets the eventual regression job
+    parallelise.
+  - `bench_util.hpp` supplies a shared per-iteration `LatencySampler`:
+    each iteration is bracketed by `__rdtscp()`, deltas are recorded
+    allocation-free into a pre-reserved vector, and on completion the p50,
+    p99, and p99.9 (plus min/max/sample-count) are published as custom
+    Google Benchmark counters. Cycles→ns comes from a one-off TSC
+    calibration against `steady_clock` at first use, cached for the run.
+  - Thread-pinning scaffold: `OEP_BENCH_PIN_CPU` (and
+    `OEP_BENCH_PIN_CPU_CONSUMER` for the SPSC consumer thread) drive
+    `pthread_setaffinity_np` before the harness starts. Non-fatal on
+    failure so CI runners without `CAP_SYS_NICE` still produce a report.
+  - Coverage matches the P1 task spec:
+    - Slab: `AllocDealloc` (L1-hot round-trip) and `DrainRefill` (whole
+      pool alloc/dealloc walk).
+    - SPSC: `PushPopRoundtrip` (single-thread lower bound) and
+      `TryPushLoaded` (real consumer thread draining on a second core;
+      `dropped_messages` reported as a counter).
+    - Order book: `AddLimit_Resting` on a prewarmed level,
+      `Cancel_Mid` on a 64-order FIFO (rotating victim keeps depth
+      stable), `Cross_Sweep` on an eight-level prewarmed ask ladder with
+      one maker per level — a level rebuild between iterations is
+      pushed out of the timed region via `PauseTiming`.
+  - `scripts/run_benchmarks.sh` runs all three binaries with
+    `--benchmark_format=json` and hands the JSON to
+    `scripts/render_latency_report.py`, which emits `docs/latency_report.md`
+    (per-binary tables of p50/p99/p99.9 in ns, plus min/max/sample count and
+    any auxiliary counters).
+  - First baseline captured in `docs/latency_report.md` (unpinned WSL2
+    host — the tail includes scheduling jitter and should be re-taken on a
+    core-isolated Linux box before it is treated as a regression baseline).
+
 - **Order book** (`cpp/core/order_book.hpp`):
   - Intrusive `LevelFIFO` limit order book on the internal clock. Orders
     are POD nodes carved from the `SlabAllocator<Order>` — no `new`/
@@ -75,15 +110,22 @@
     byte-identical fill stream on two independent books.
 
 **Pending:**
-- Benchmark harness (Google Benchmark, HdrHistogram) + `latency_report.md`.
-- CI (`.github/workflows/ci.yml`) with the benchmark-regression gate.
+- `perf` cache/branch-miss numbers to sit alongside the p50/p99/p99.9 table
+  (harness ready, needs a core-isolated Linux run).
+- HdrHistogram integration to replace the sort-in-memory percentile path
+  when sample counts push past ~10^8.
+- CI (`.github/workflows/ci.yml`) with the benchmark-regression gate on top
+  of the JSON output the harness already produces.
 - Wire order-book state changes through the SPSC ring to the relay side.
 
 **Bugs/Issues:** None.
 
 **Next Tasks:**
-1. Stand up the Google Benchmark harness so P1's gate — p50/p99/p99.9
-   histogram + `perf` counters — has somewhere to publish.
-2. Route order-book fills/acks through the SPSC ring to the external
+1. Route order-book fills/acks through the SPSC ring to the external
    (relay) clock.
-3. Add the CI workflow with the benchmark-regression gate.
+2. Add the CI workflow with the benchmark-regression gate (fails if p99 of
+   any tracked benchmark regresses beyond a threshold vs the committed
+   baseline JSON in `benchmarks/`).
+3. Re-take the latency baseline on a core-isolated Linux box (with
+   `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER`) and commit the
+   resulting `docs/latency_report.md` alongside the pinning notes.

@@ -24,3 +24,11 @@ target_include_directories(oep_core INTERFACE ${CMAKE_SOURCE_DIR}/cpp)
 
 enable_testing()
 add_subdirectory(cpp/tests)
+
+# Latency benchmarks (Google Benchmark) — internal-clock hot-path only,
+# per docs/architecture.md §7. Opt in with -DOEP_BUILD_BENCHMARKS=ON so a
+# vanilla test-only build stays fast.
+option(OEP_BUILD_BENCHMARKS "Build the internal-clock latency benchmarks" ON)
+if(OEP_BUILD_BENCHMARKS)
+  add_subdirectory(cpp/benchmarks)
+endif()
