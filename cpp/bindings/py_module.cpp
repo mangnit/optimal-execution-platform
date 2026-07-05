@@ -52,8 +52,8 @@ namespace {
 // construction, never on the hot path.
 constexpr std::size_t kRingCapacity = 1u << 16;
 constexpr std::size_t kBookCapacity = 8192;
-constexpr oep::core::Price kMinPrewarmPx = 90;
-constexpr oep::core::Price kMaxPrewarmPx = 110;
+constexpr oep::core::Price kMinPrewarmPx = 80;
+constexpr oep::core::Price kMaxPrewarmPx = 120;
 
 // State vector layout (kept small and flat — docs/architecture.md "host-to-device"):
 //   [0] q_remaining / parent_qty         — normalised inventory left
@@ -66,6 +66,16 @@ constexpr oep::core::Price kMaxPrewarmPx = 110;
 //   [7] avg_fill_price / arrival_mid     — 1.0 when nothing has filled yet
 constexpr std::size_t kStateDim = 8;
 constexpr std::size_t kActionDim = 2;
+
+// Reward-shaping constants (namespace scope so the no-trade path and the
+// executed-step path share one definition — TRIAL 2, reward structure).
+//   kPhi                 : inventory holding-penalty coefficient φ in φ·(q/Q)².
+//   kTerminalStressTicks : unsold inventory at episode end is marked-to-
+//     liquidation at (arrival_mid − this), a price strictly worse than the
+//     deepest reachable fill, so under-executing is never cheaper than
+//     completing the parent order.
+constexpr float kPhi = 1.0f;  // TRIAL 3: 0.25→1.0, urgency knob (front-load)
+constexpr double kTerminalStressTicks = 10.0;
 
 // Deterministic PRNG (xorshift64) — bit-identical to sim_runner.cpp so a
 // shared seed produces the same exogenous flow in both drivers.
@@ -212,15 +222,20 @@ class SimEnv {
     // 1) Background flow: a small burst of synthetic maker/taker orders to
     //    keep the book alive. Same recipe as sim_runner.cpp so the seeded
     //    determinism rule is preserved end-to-end.
-    for (int k = 0; k < 4; ++k) {
+    // TRIAL 1 (liquidity): deeper flow with a clean bid/ask split. Buys rest
+    // strictly below mid, sells strictly above, so background orders do not
+    // self-cross and a real two-sided book with persistent bid depth builds up
+    // for our seller to hit. 12 orders/step × qty 10..49 gives ample depth to
+    // absorb a 1000-share parent over the 32-step horizon.
+    for (int k = 0; k < 12; ++k) {
       const bool buy = (rng_.Next() & 1ULL) != 0ULL;
       const oep::core::Side side =
           buy ? oep::core::Side::kBuy : oep::core::Side::kSell;
-      const oep::core::Price offset =
-          static_cast<oep::core::Price>(rng_.Next() % 11ULL) - 5;
+      const oep::core::Price depth =
+          static_cast<oep::core::Price>(rng_.Next() % 5ULL);  // 0..4 ticks
       const oep::core::Price px =
-          buy ? (arrival_mid_ - 1 + offset) : (arrival_mid_ + 1 + offset);
-      const oep::core::Quantity qty = 1 + (rng_.Next() % 4ULL);
+          buy ? (arrival_mid_ - 1 - depth) : (arrival_mid_ + 1 + depth);
+      const oep::core::Quantity qty = 10 + (rng_.Next() % 40ULL);  // 10..49
       const oep::core::OrderId id = next_id_++;
 
       // Slab-eviction guard mirrors sim_runner.cpp — never trip AddLimit→false.
@@ -251,9 +266,15 @@ class SimEnv {
       child_qty = remaining_;
     }
     if (child_qty == 0) {
+      // TRIAL 2: the holding penalty still applies when the agent sends
+      // nothing — otherwise size_frac→0 dodges the inventory cost entirely and
+      // "do nothing" dominates any real execution (the reward hack observed in
+      // Trial 1: trained policy size≈0.008 → 0 fills).
+      const float idle_inv_frac = static_cast<float>(remaining_) /
+                                  static_cast<float>(parent_qty_);
       ++step_idx_;
       MaybeCloseOut();
-      return 0.0f;
+      return -kPhi * idle_inv_frac * idle_inv_frac;
     }
 
     const oep::core::Price best_bid_now =
@@ -264,8 +285,12 @@ class SimEnv {
     // aggression=1 crosses through the best bid (marketable sell).
     const oep::core::Price passive_px = best_ask_now;    // rest at ask
     const oep::core::Price aggressive_px = best_bid_now; // sweep bid
-    const oep::core::Price child_px =
-        (aggression >= 0.5f) ? aggressive_px : passive_px;
+    // TRIAL 2: the terminal step is a forced liquidation at T — it must cross so
+    // inventory is actually cleared. Posting passively at T (which never fills
+    // in this book) can no longer be used to dodge execution and its shortfall.
+    const bool terminal = (step_idx_ + 1 >= horizon_steps_);
+    const bool aggressive = terminal || (aggression >= 0.5f);
+    const oep::core::Price child_px = aggressive ? aggressive_px : passive_px;
 
     // Fused fill observer: emits telemetry (matches TelemetryPublisher's
     // AddLimit exactly — one Fill event per maker/taker pair, one Ack iff
@@ -312,15 +337,28 @@ class SimEnv {
     remaining_ = (filled >= remaining_) ? 0 : (remaining_ - filled);
 
     // Inventory holding penalty φ · (q/Q)^2 — a modest running cost that
-    // matches §5.4. φ chosen small so the shortfall term dominates in the
-    // smoke test.
-    constexpr float kPhi = 0.25f;
+    // matches §5.4 (φ = kPhi, namespace scope).
     const float inv_frac = static_cast<float>(remaining_) /
                            static_cast<float>(parent_qty_);
     reward -= kPhi * inv_frac * inv_frac;
 
     ++step_idx_;
     MaybeCloseOut();
+
+    // TRIAL 2 completion incentive: whatever is still unsold when the episode
+    // ends is marked-to-liquidation at (S₀ − kTerminalStressTicks), a price
+    // strictly worse than the deepest reachable fill. This makes leaving
+    // inventory unexecuted at least as costly as crossing for it, so the
+    // reward-optimal behaviour is to actually complete the parent order.
+    if (done_ && remaining_ > 0) {
+      const double stress_px =
+          static_cast<double>(s0) - kTerminalStressTicks;
+      const double stress_bps = (stress_px - static_cast<double>(s0)) /
+                                static_cast<double>(s0) * 1e4 *
+                                static_cast<double>(remaining_) /
+                                static_cast<double>(parent_qty_);
+      reward += static_cast<float>(stress_bps);
+    }
     return reward;
   }
 

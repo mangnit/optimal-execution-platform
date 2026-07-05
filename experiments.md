@@ -1,0 +1,103 @@
+# SAC Execution-Agent Tuning — Experiment Log
+
+**Objective:** SAC agent fills only 0–3 / 1000 units; best reward plateau −12.12.
+Diagnose and fix across 5 diverse trials (one parameter *category* each), rebuild
+the pybind module, retrain, log. Full state in `research_state.md`.
+
+Sign convention (docs/architecture.md): parent = **SELL** of `Q` over `[0,T]`, arrival mid
+`S₀`. Marketable sell hits the **bid**; passive rests on the **ask**. Reward =
+per-step realised bps vs `S₀`, normalised by `parent_qty`, minus `φ·(q/Q)²`.
+
+---
+
+## Prior history (supplied)
+
+| Trial | kPhi (C++) | Learning Rate | Patience | Mean Reward | Note |
+|-------|-----------|---------------|----------|-------------|------|
+| 1 | 0.5f  | 3e-4 | 10 | −21.3  | Baseline |
+| 2 | 0.25f | 1e-4 | 50 | −12.12 | Prior best |
+
+---
+
+## DIAGNOSIS — the environment is broken, not the agent
+
+Fill ceiling (best any policy can do), fixed policies through built `oep_env.SimEnv`
+(parent_qty=1000, horizon=32, mid=100, seed=0xC0FFEEBABE):
+
+| Fixed policy (size_frac, aggression) | qty_filled / 1000 | total reward |
+|--------------------------------------|-------------------|--------------|
+| all_aggressive (1.0, 1.0)            | 7                 | −10.62 |
+| all_passive (1.0, 0.0)               | 0                 | −8.00 |
+| mid (0.5, 0.5)                       | 7                 | −10.62 |
+| twap_aggressive (1/(T−t), 1.0)       | 10 (ceiling)      | −12.10 |
+| small_aggressive (0.1, 1.0)          | 7                 | −10.62 |
+| random                               | 9                 | −10.97 |
+
+**Root cause — two coupled defects in `cpp/bindings/py_module.cpp::StepImpl`:**
+1. **No resting bid ever exists** — `best_bid` (obs[2]) = 0 every step; seller has
+   nothing to hit. Background flow too thin + self-crossing.
+2. **Child order poisons the book** — marketable child sell rests its entire unfilled
+   residual as a cheap ask that absorbs all future background buys → bid never re-forms.
+
+`all_passive` fills 0, scores exactly −8.0 = kPhi(0.25)·1.0²·32. Prior −12.12 "best" is
+worse than the do-nothing floor. kPhi/LR/patience cannot fix an unfillable market.
+
+Perf: env ~3.2e5 steps/s; SAC CPU-only (torch 2.12, sb3 2.9, 4 threads, 3.78 GB) ~1e2 ts/s.
+Trials run at `--total-timesteps 200000` (see research_state.md §3 for rationale).
+
+---
+
+## Results
+
+> **Reward scale changed after Trial 1.** On the broken env near-zero fills meant
+> reward was tiny penalties; once 1000 units actually execute, each fill books real
+> bps shortfall, so numbers are NOT comparable to the prior −12.12. The metrics that
+> matter now: (a) trained-policy **fills → 1000** and (b) **avg_fill vs S₀=100**.
+
+| Trial | Category | Change | Trained-policy reward | Fills/1000 | Note |
+|-------|----------|--------|----------------------|-----------|------|
+| — | baseline | unmodified env | −12.12 (prior) | 0–10 | fill ceiling ~1%, env bug |
+| 1 | Liquidity ("Hawkes") | flow 4→12 orders/step, qty 1–4→10–49, buys strictly below mid / sells above; prewarm [80,120] | −0.5 (illusory) | **0/1000** | **Necessary but not sufficient.** Fixed-policy fill ceiling 7→**1000** (bids now persist). BUT SAC reward-hacks: trained policy `size≈0.008, aggr≈0.065` → does nothing, fills 0, scores −0.5 (beats any real execution). Root: `child_qty==0` early-returns w/o inventory penalty; terminal forced sell posted passively never fills. **Next bottleneck = reward structure.** |
+| 2 | Reward structure (pivoted from IOC) | non-dodgeable holding penalty on `child_qty==0`; terminal step forces marketable cross; unsold-at-T marked-to-liquidation at `S₀−10` (`kTerminalStressTicks`) | −107.75 (eval seed); train ep_rew_mean −124 | **1000/1000** (2/3 seeds; 531 on seed 0x1234) | **SUCCESS — execution restored, reward-hack dead (0→1000 fills).** Trained policy completes 1000/1000 at avg 99.0 (IS≈100 bps) on eval seed. −107.75 is the env's patient optimum (passive fills impossible → avg>99 unreachable); eval metric saturated by ~20k. Residual: leans on terminal dump (`aggr≈0.44`) so under-fills the hardest seed → cross-seed robustness + urgency are the levers for Trials 3–5. |
+| 3 | Inventory penalty kPhi | `kPhi` 0.25→**1.0** (urgency knob) | −131 (patient basin); train −149 | 1000/1000 (2/3; 531 on 0x1234) | **φ confirmed as urgency control but SAC can't exploit it.** Probe: φ=1.0 flips fixed-policy optimum (twap −120.7 **>** do_nothing −131) → active execution *should* win. But SAC stays in the passive/terminal-dump basin (learned `size≈0.014, aggr≈0.168`; `remaining` flat at 1.00 until T). Higher φ only made reward more negative w/o changing behavior. **Bottleneck moved to SAC optimization/exploration** (premature collapse to passive after early aggressive crosses score −432). φ=1.0 kept (sets the incentive); T4/T5 target the optimization. |
+| 4 | Learning rate | `learning_rate` 1e-4→**3e-4** | −131 (patient basin); train −147 | 1000/1000 (2/3; 531 on 0x1234) | **Step-size is not the constraint.** Same passive basin; `aggr` collapsed even harder to **0.000**, `remaining` flat at 1.00. Higher LR reaches the same local optimum faster. Confirms the blocker is reward/obs *conditioning*, not gradient step size → Trial 5. |
+| 5 | Normalization | `VecNormalize(norm_obs=True, norm_reward=True, clip_obs=10)` on train; frozen shared-stats eval; persist `vecnormalize.pkl` (run direct, not via supervisor, to survive the post-`learn()` save) | −131.8 / −126.6 (2 seeds); −603 (0x1234) | **1000/1000** (2/3); 467 on 0x1234 | **Escapes the passive basin — active execution learned.** `remaining` now declines mid-episode (1.00→0.13; `size≈0.52, aggr≈0.46`) instead of flat-at-1.00. Completes 1000/1000 on 2/3 seeds at avg ~98.9 (IS ~110 bps). Confirms the T3/T4 diagnosis (blocker = reward/obs conditioning). Residual: under-fills hardest seed (cross-seed robustness), and raw reward ≈ patient because active crossing walks the book down slightly. |
+
+---
+
+## Summary & Recommendation
+
+**The reported failure was an environment bug, not an RL tuning problem.** The
+"0–3 fills / 1000, plateau −12.12" symptom came from two defects in the C++ env
+(no resting bid ever formed; the child order poisoned the book), capping the fill
+ceiling at ~1% for *every* policy. kPhi/LR/patience were red herrings.
+
+Causal chain the 5 diverse trials established:
+1. **Liquidity (T1)** made fills *possible* (ceiling 7→1000) but exposed a
+   reward-hack: SAC learned to *not trade*.
+2. **Reward structure (T2)** closed the no-trade loopholes (non-dodgeable holding
+   penalty + forced terminal cross + mark-to-liquidation of unsold inventory) →
+   **execution restored, 0→1000 fills.** This is the single highest-impact fix.
+3. **kPhi (T3)** is the urgency knob — φ=1.0 makes active execution reward-optimal
+   in theory, but SAC couldn't exploit it.
+4. **Learning rate (T4)** ruled out step-size as the blocker.
+5. **Normalization (T5)** unblocked SAC's optimization → an **active execution
+   schedule** that completes 1000/1000 on most seeds.
+
+**Recommended production config:** T1 liquidity + T2 reward structure + φ=1.0
+(T3) + LR 3e-4 (T4) + VecNormalize obs+reward (T5). All are kept in the tree.
+
+**Biggest remaining lever (out of the 5-trial scope, most important next step):**
+background resting bids never cancel/expire, so depth accumulates and *patience is
+artificially optimal* — this is why raw reward barely separates active from
+passive. Adding churn/decay to resting background liquidity (or enabling passive
+fills via occasional aggressive background buyers) would make steady TWAP-like
+execution strictly win and improve cross-seed robustness (the 0x1234 under-fill).
+That is an environment-realism change, not more RL tuning.
+
+**Methodology note:** trials used `--total-timesteps` 200k (T1–T4) / 120k (T5),
+not 500k — on this CPU-only box (~100 ts/s) the fill/behaviour signal is
+unambiguous well before then, and the supervisor's plateau early-stop was
+observed to cut degenerate configs. Reward magnitudes are NOT comparable across
+trials that change the reward function (T2, T3) or normalize it (T5); the
+decision metrics are trained-policy **fills** and **avg_fill vs S₀**.

@@ -21,7 +21,11 @@ if str(_REPO_ROOT / "python") not in sys.path:
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecNormalize,
+)
 
 from env.execution_env import ExecutionEnv
 
@@ -86,6 +90,19 @@ def main() -> int:
     train_env = _build_train_env(args.n_envs, args.seed)
     eval_env = _build_eval_env(args.eval_seed)
 
+    # TRIAL 5: normalise observations (raw tick prices ~99 swamp the [0,1]
+    # features) and rewards (magnitudes span −100..−550, ill-conditioning the
+    # critic and biasing SAC toward the "safe" passive action). Eval shares the
+    # running obs stats and is frozen (training=False, norm_reward=False) so
+    # eval numbers stay in real reward units.
+    train_env = VecNormalize(
+        train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=0.99
+    )
+    eval_env = VecNormalize(
+        eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False
+    )
+    eval_env.obs_rms = train_env.obs_rms
+
     try:
         model = SAC(
             policy="MlpPolicy",
@@ -98,7 +115,7 @@ def main() -> int:
             buffer_size=50_000,
             batch_size=256,
             learning_starts=1_000,
-            learning_rate=1e-4,
+            learning_rate=3e-4,  # TRIAL 4: 1e-4→3e-4 to escape passive basin
             ent_coef="auto",
         )
 
@@ -121,7 +138,10 @@ def main() -> int:
         )
 
         model.save(str(args.model_path))
+        vecnorm_path = args.model_path.parent / "vecnormalize.pkl"
+        train_env.save(str(vecnorm_path))  # TRIAL 5: persist obs/reward stats
         print(f"[train_sac] saved model to {args.model_path}")
+        print(f"[train_sac] saved vecnormalize stats to {vecnorm_path}")
         print(f"[train_sac] tensorboard logs at {args.log_dir}")
     finally:
         train_env.close()
