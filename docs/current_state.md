@@ -1,10 +1,27 @@
 # Current State
 
-**Phase:** P5.4 – SAC training loop (`train_sac.py`) — **COMPLETE**.
+**Phase:** P5.5 – TorchScript export (`export_torchscript.py`) — **COMPLETE**.
 Full `ctest` suite still passes **62/62**, `scripts/test_bridge.py`
 and `scripts/test_gym.py` smoke tests are green, and
-`python -m train.train_sac` now drives Stable-Baselines3 SAC end-to-end
-against four parallel C++ SimEnv workers.
+`python3 python/train/export_torchscript.py` now emits a native
+`models/sac_policy.pt` ready for the C++ LibTorch loader.
+
+- **TorchScript export** (`python/train/export_torchscript.py`):
+  extracted the SAC actor from `models/sac_oep_baseline.zip`, wrapped
+  it in a thin `_DeterministicActor` `nn.Module` that always calls
+  `actor(obs, deterministic=True)` — trace only sees the mean-action
+  branch, so the SB3 stochastic sampling path (which is not
+  script-safe) never enters the graph. Traced with a `(1, 8)` float32
+  dummy obs matching `ExecutionEnv.observation_space`, then saved via
+  `torch.jit.trace(...).save()` to `models/sac_policy.pt` (287.4 KiB,
+  actor MLP only — critic / replay buffer / optimizer state from the
+  `.zip` are deliberately dropped). Post-save reload with
+  `torch.jit.load` and a forward pass confirmed a `(1, 2)` output
+  shape, matching `ExecutionEnv.action_space = Box([0,1]^2, float32)`,
+  so a broken export fails inside Python before the C++ side ever
+  touches the file. CLI knobs (`--model-path`, `--out-path`) let the
+  same script serve later sweeps without an edit. `models/` stays
+  `.gitignore`d — the artifact is a build output, not source.
 
 - **SAC training loop** (`python/train/train_sac.py`,
   `python/train/__init__.py`): wired Stable-Baselines3 SAC to
@@ -486,14 +503,17 @@ of the relay thread, not producer-side. Re-take on a
 core-isolated Linux box (per the pending item below) is expected
 to collapse the tail by >100×.
 
-**Next steps — moving into P5.**
-1. Extend `q/tca_analysis.q` to reconstruct fills against arrival
+**Next steps — closing out P5 and moving into P6.**
+1. C++ LibTorch loader that mmaps `models/sac_policy.pt` and drives
+   `SimEnv` inference on the external clock — the traced graph's
+   `(1, 8) → (1, 2)` contract is the interface to build against.
+2. Extend `q/tca_analysis.q` to reconstruct fills against arrival
    mid and compute IS in bps with the docs/architecture.md sign convention
-   (parent SELL of Q over [0, T]) — the last piece before P5's
-   TWAP/VWAP/AC baselines land on top.
-2. Wire the live loop's FIX gateway onto the external clock the
+   (parent SELL of Q over [0, T]), so the trained SAC policy can be
+   benchmarked against the P5.1 TWAP/VWAP/AC baselines head-to-head.
+3. Wire the live loop's FIX gateway onto the external clock the
    relay + KDB+ logger already occupy — no gateway I/O may leak
    onto the hot path.
-3. Re-take the latency baseline on a core-isolated Linux host with
+4. Re-take the latency baseline on a core-isolated Linux host with
    `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER` set and commit
    the resulting `docs/latency_report.md` alongside the pinning notes.
