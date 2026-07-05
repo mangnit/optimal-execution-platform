@@ -1,9 +1,32 @@
 # Current State
 
-**Phase:** P5.1 – Analytical execution baselines (Almgren–Chriss + VWAP)
-— **COMPLETE**. Full `ctest` suite passes **62/62**.
+**Phase:** P5.2 – Pybind11 bridge (oep_env module) — **COMPLETE**.
+Full `ctest` suite still passes **62/62** and `scripts/test_bridge.py`
+smoke tests are green end-to-end.
 
-- Implemented the Almgren–Chriss and VWAP analytical baselines as
+- **Pybind11 bridge** (`cpp/bindings/py_module.cpp`,
+  `CMakeLists.txt` gated on `-DOEP_BUILD_PYBIND=ON`,
+  `scripts/test_bridge.py`): built the `oep_env` shared module and
+  implemented the zero-allocation `SimEnv` bridge — same
+  `OrderBook → TelemetryPublisher → SpscRing → EventRelay →
+  InMemoryKdbLogger` stack `sim_runner` uses, wrapped behind a flat
+  float32 `step(action)` / `state()` interface. State buffer
+  (`kStateDim=8`) is `alignas(64)` and wrapped once as a zero-copy
+  `py::array_t<float>` view; the length-2 action is read into locals
+  before the C++ body runs. **GIL discipline (docs/architecture.md P5+ rule):**
+  `py::gil_scoped_release` guards the entire C++ internal-clock step
+  — background flow, child order via `book_.AddLimit` with a fused
+  on-fill lambda (telemetry push + reward accumulation, one book call,
+  zero virtual dispatch) — reacquired by the guard's dtor before
+  `WriteState()` touches the numpy buffer. Ring is heap-allocated once
+  in the ctor (2.5 MiB `SpscRing<TelemetryEvent, 1<<16>`) so `step()`
+  never allocates. `scripts/test_bridge.py` drives two policies
+  (TWAP-passive and all-in-aggressive) through a full 32-step horizon
+  and asserts `dropped_messages() == 0`, finite reward, and bounded
+  episode length — **all smoke tests pass**.
+
+**Prior phase snapshot (P5.1, complete):** Implemented the
+Almgren–Chriss and VWAP analytical baselines as
   zero-allocation CRTP strategies
   ([cpp/exec/strategy.hpp](cpp/exec/strategy.hpp),
   [cpp/exec/almgren_chriss.{hpp,cpp}](cpp/exec/almgren_chriss.hpp),

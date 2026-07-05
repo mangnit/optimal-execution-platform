@@ -84,3 +84,24 @@ target_link_libraries(sim_runner PRIVATE oep_core pthread)
 if(OEP_USE_KDB)
   target_link_libraries(sim_runner PRIVATE oep_kdb_ipc)
 endif()
+
+# Pybind11 bridge (task P5.2). Off by default so a vanilla `-DOEP_BUILD_PYBIND=OFF`
+# checkout stays fast and CI does not need Python/pybind11 on PATH. Turn on with
+# -DOEP_BUILD_PYBIND=ON (and optionally -DPython_EXECUTABLE=... to pin the
+# interpreter). Produces a shared module named `oep_env` that Python can import.
+option(OEP_BUILD_PYBIND "Build the pybind11 bridge module oep_env" OFF)
+if(OEP_BUILD_PYBIND)
+  # Prefer the Development.Module component — enough to build a Python
+  # extension without needing the full Python.h shared-library link.
+  find_package(Python 3.11 COMPONENTS Interpreter Development.Module REQUIRED)
+  find_package(pybind11 CONFIG REQUIRED)
+
+  pybind11_add_module(oep_env MODULE cpp/bindings/py_module.cpp)
+  # Bridge is on the boundary between clocks — the same header set as sim_runner
+  # is required (order book, ring, publisher, relay, TSC clock).
+  target_link_libraries(oep_env PRIVATE oep_core pthread)
+  # -Werror is inherited from add_compile_options above; pybind11's own headers
+  # are clean under it. Suppress the visibility warning the pybind11 harness
+  # emits when combined with GCC's -Wextra so -Werror does not trip on it.
+  target_compile_options(oep_env PRIVATE -fvisibility=hidden)
+endif()
