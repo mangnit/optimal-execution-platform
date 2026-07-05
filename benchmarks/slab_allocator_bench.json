@@ -1,0 +1,80 @@
+{
+  "context": {
+    "date": "2026-07-04T20:51:37+05:30",
+    "host_name": "LAPTOP-AEPE3M3P",
+    "executable": "/home/summa/optimal-execution-platform/build/cpp/benchmarks/slab_allocator_bench",
+    "num_cpus": 8,
+    "mhz_per_cpu": 1382,
+    "cpu_scaling_enabled": false,
+    "caches": [
+      {
+        "type": "Data",
+        "level": 1,
+        "size": 49152,
+        "num_sharing": 2
+      },
+      {
+        "type": "Instruction",
+        "level": 1,
+        "size": 32768,
+        "num_sharing": 2
+      },
+      {
+        "type": "Unified",
+        "level": 2,
+        "size": 1310720,
+        "num_sharing": 2
+      },
+      {
+        "type": "Unified",
+        "level": 3,
+        "size": 8388608,
+        "num_sharing": 8
+      }
+    ],
+    "load_avg": [0.6,0.45,0.26],
+    "library_build_type": "release"
+  },
+  "benchmarks": [
+    {
+      "name": "BM_Slab_AllocDealloc",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_Slab_AllocDealloc",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 106213249,
+      "real_time": 2.9287961561179099e+01,
+      "cpu_time": 2.9284124723460817e+01,
+      "time_unit": "ns",
+      "max_ns": 7.6202816202262882e+05,
+      "min_ns": 7.2338081841783737e+00,
+      "p50_ns": 1.0127331457849724e+01,
+      "p999_ns": 2.3148186189370797e+01,
+      "p99_ns": 1.7361139642028100e+01,
+      "samples": 1.0621324900000000e+08
+    },
+    {
+      "name": "BM_Slab_DrainRefill",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_Slab_DrainRefill",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 886091,
+      "real_time": 3.1609682256114424e+03,
+      "cpu_time": 3.1607663501829952e+03,
+      "time_unit": "ns",
+      "max_ns": 5.4325899463179587e+02,
+      "min_ns": 7.2338081841783741e-01,
+      "p50_ns": 1.4467616368356748e+00,
+      "p999_ns": 7.9571890025962118e+00,
+      "p99_ns": 2.1701424552535125e+00,
+      "samples": 8.8609100000000000e+05
+    }
+  ]
+}

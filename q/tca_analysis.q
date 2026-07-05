@@ -1,0 +1,14 @@
+h:hopen `::5010;
+trades:h"0!trade";
+show "--- Phase 4: TCA Results ---";
+show "Rows delivered: ", string count trades;
+seqs: trades`seq;
+expected: 1 + (last seqs) - (first seqs);
+drops: expected - count seqs;
+show "Dropped frames: ", string drops;
+lag: trades[`wall_ns] - trades[`ts_ns];
+med_lag: med lag;
+drift: abs lag - med_lag;
+show "Median Lag (ns): ", string med_lag;
+show "Max Drift from Median (ns): ", string max drift;
+exit 0;

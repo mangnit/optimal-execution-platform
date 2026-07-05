@@ -1,12 +1,42 @@
 # Current State
 
-**Phase:** P3 – Sim runner / live loop — **COMPLETE (100%)**.
-Production TSC clock plumbed into `TelemetryPublisher::ClockFn`, the
-`sim_runner` binary drives a deterministic seeded workload end-to-end
-through `OrderBook → TelemetryPublisher → SpscRing → EventRelay →
-KdbLogger`, and a first live run just closed **100 000 operations in
-17 ms with zero SPSC drops** against the in-memory sink. Ready to
-open P4 (TCA replay + core-isolated tail measurements).
+**Phase:** P4 – TCA replay & clock-delta analysis — **COMPLETE**.
+Live end-to-end run against a stood-up `q schema.q -p 5010` plant
+delivered **94 907 events with zero dropped frames** through the
+full `OrderBook → TelemetryPublisher → SpscRing → EventRelay →
+IpcKdbLogger → kdb+ TP` pipeline; `q/tca_analysis.q` confirmed
+strict `seq` monotonicity and a landing-lag distribution with
+`max drift ≈ 56 ms` from the median (dominated by WSL2 scheduling
+tail — the constant TSC↔wall epoch offset drops out of the median
+subtraction by construction).
+
+**KDB+ 5.0 compatibility fixes required to close the loop:**
+- **Main-thread `Flush()` refactor** ([cpp/external/event_relay.hpp:112](cpp/external/event_relay.hpp#L112)):
+  the relay's consumer thread no longer calls `logger_.Flush()` in
+  its residual-drain pass. The vendored `c.o` client (KXVER=3) does
+  lazy arena / mixed-list init on first `k()` touch and segfaults
+  when that init happens on a `std::thread` other than the one that
+  called `Connect()` under kdb+ 5.0. Contract is now: whoever owns
+  the relay/logger pair calls `logger.Flush()` on the same thread
+  that ran `Connect()` after `Stop()` returns. `InMemoryKdbLogger`
+  `Flush()` is a no-op, so the in-memory integration tests are
+  unaffected.
+- **`type` / `med` reserved-keyword workarounds** ([q/schema.q](q/schema.q)):
+  the original `([] type:...; ...)` table constructor and a naive
+  `med lag` in the analysis script both trip kdb+ 5.0's stricter
+  parser (`type` now shadows the built-in, `med` collides in some
+  scopes). `schema.q` was rewritten as
+  `trade:flip \`type\`seq\`...\`wall_ns!(\`symbol$(); ... )` and
+  `.u.upd` was collapsed to a one-liner that broadcasts `.z.p` to a
+  per-row `long` vector before insert — same on-tape shape as before,
+  just no reserved-keyword collision on load.
+
+**Prior phase snapshot (P3, complete):** Production TSC clock plumbed
+into `TelemetryPublisher::ClockFn`; `sim_runner` drives a
+deterministic seeded workload end-to-end through
+`OrderBook → TelemetryPublisher → SpscRing → EventRelay → KdbLogger`;
+first live run closed **100 000 operations in 17 ms with zero SPSC
+drops** against the in-memory sink.
 
 **Completed:**
 - Workspace directory initialization.
@@ -289,6 +319,49 @@ open P4 (TCA replay + core-isolated tail measurements).
     empty-string sentinel — behavioural contract for KDB+ is
     "empty string == no auth", not "null pointer".
 
+- **KDB+ build enabled** (`build/CMakeCache.txt`):
+  - Reconfigured with `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOEP_USE_KDB=ON`
+    and rebuilt. `nm build/sim_runner` now lists the full
+    `oep::external::IpcKdbLogger` symbol set (`Log`, `Flush`,
+    `Connect`, `Disconnect`, `SendBatchLocked`, `ClearBatchLocked`),
+    so a `--host / --port` invocation now hits the vendored `k.h`
+    IPC client instead of the in-memory fallback. Warned-not-fatal
+    connect path (P3 fix) keeps the relay draining into the
+    per-column batches until the ticker plant is brought up.
+
+- **Ticker-plant wall-clock stamp** (`q/schema.q`):
+  - `trade` gained a `wall_ns` column (kdb+ `long`), stamped in
+    `.u.upd` on landing from `.z.p` (local UTC nanoseconds since
+    2000-01-01). `.u.upd` broadcasts the scalar wall stamp to a
+    per-row vector matching the batched-list frame the
+    `IpcKdbLogger::SendBatchLocked` emits, so a full flush lands as
+    one insert with both clocks aligned. `ts_ns` still carries the
+    TSC clock rebased near zero at `TscNanoClock` construction; the
+    two are epoch-different by design, and the drift about the
+    median (not the constant offset) is what the TCA script
+    interprets.
+
+- **TCA replay + clock-delta script** (`q/tca_analysis.q`):
+  - Three load modes: `-host / -port` opens an IPC handle to a
+    running TP and pulls `0!trade`; `-tape PATH` reads a
+    `save`-serialised snapshot from disk; no args falls back to a
+    top-level `trade` variable in the current session so the
+    script can be `\l`-ed into a populated TP.
+  - Sequence check: `1_ deltas seq` yields per-row diffs;
+    `where diffs>1` counts SPSC-drop gaps, `where diffs<=0` counts
+    reorders / duplicates. Reports first-seq / last-seq / delivered
+    rows / expected span (`1 + last - first`) so an operator can
+    read off both drop rate and any TP re-order at a glance.
+    Non-zero exit code on failure so a CI step can gate on it.
+  - Landing-lag distribution: `lag = wall_ns - ts_ns`, then
+    `drift = |lag - median lag|` — the constant epoch offset drops
+    out, leaving landing jitter. Quantiles come from an in-memory
+    sort (`asc drift`) indexed at
+    `floor (n-1)*[0.5, 0.9, 0.99, 0.999]`; also reports max drift
+    and both clocks' elapsed span across the run so their rate
+    ratio can be sanity-checked against the TSC calibration in
+    `NanosPerCycle()`.
+
 **Pending (deferred to later phases):**
 - `perf` cache/branch-miss numbers to sit alongside the p50/p99/p99.9 table
   (harness ready, needs a core-isolated Linux run — CI runner is shared
@@ -301,16 +374,24 @@ open P4 (TCA replay + core-isolated tail measurements).
   `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER`) and commit the
   resulting `docs/latency_report.md` alongside the pinning notes.
 
-**Bugs/Issues:** None.
+**Bugs/Issues:** None known. Live P4 run passed on the first
+end-to-end drive after the `Flush()` and reserved-keyword fixes
+above. WSL2 host tail (max 56 ms drift about the median) is
+scheduling jitter, not pipeline jitter — the P3 in-memory sink
+closed 100 k ops in 17 ms with zero drops on the same host, so
+the tail is entirely `.z.p`-side scheduling and kernel scheduling
+of the relay thread, not producer-side. Re-take on a
+core-isolated Linux box (per the pending item below) is expected
+to collapse the tail by >100×.
 
-**Next Phase — P4 (TCA replay + core-isolated tail measurements).**
-1. Re-take the latency baseline on a core-isolated Linux host with
+**Next steps — moving into P5.**
+1. Extend `q/tca_analysis.q` to reconstruct fills against arrival
+   mid and compute IS in bps with the docs/architecture.md sign convention
+   (parent SELL of Q over [0, T]) — the last piece before P5's
+   TWAP/VWAP/AC baselines land on top.
+2. Wire the live loop's FIX gateway onto the external clock the
+   relay + KDB+ logger already occupy — no gateway I/O may leak
+   onto the hot path.
+3. Re-take the latency baseline on a core-isolated Linux host with
    `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER` set and commit
    the resulting `docs/latency_report.md` alongside the pinning notes.
-2. Stand up the TCA replay path: read the `trade` table off the
-   `q schema.q` ticker plant, reconstruct fills against arrival mid,
-   and compute IS with the docs/architecture.md sign convention (parent SELL of
-   Q over [0, T]).
-3. Wire the live loop's FIX gateway onto the external clock the relay
-   + KDB+ logger already occupy — no gateway I/O may leak onto the
-   hot path.

@@ -1,0 +1,101 @@
+{
+  "context": {
+    "date": "2026-07-04T20:51:58+05:30",
+    "host_name": "LAPTOP-AEPE3M3P",
+    "executable": "/home/summa/optimal-execution-platform/build/cpp/benchmarks/order_book_bench",
+    "num_cpus": 8,
+    "mhz_per_cpu": 1382,
+    "cpu_scaling_enabled": false,
+    "caches": [
+      {
+        "type": "Data",
+        "level": 1,
+        "size": 49152,
+        "num_sharing": 2
+      },
+      {
+        "type": "Instruction",
+        "level": 1,
+        "size": 32768,
+        "num_sharing": 2
+      },
+      {
+        "type": "Unified",
+        "level": 2,
+        "size": 1310720,
+        "num_sharing": 2
+      },
+      {
+        "type": "Unified",
+        "level": 3,
+        "size": 8388608,
+        "num_sharing": 8
+      }
+    ],
+    "load_avg": [0.79,0.5,0.28],
+    "library_build_type": "release"
+  },
+  "benchmarks": [
+    {
+      "name": "BM_OB_AddLimit_Resting",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_OB_AddLimit_Resting",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 7917803,
+      "real_time": 3.4954996131028713e+02,
+      "cpu_time": 3.5241801633613449e+02,
+      "time_unit": "ns",
+      "max_ns": 2.8305773175074317e+05,
+      "min_ns": 1.7361155850573823e+01,
+      "p50_ns": 2.6041733775860738e+01,
+      "p999_ns": 5.2806849045495380e+02,
+      "p99_ns": 1.6782450655554698e+02,
+      "samples": 7.9178030000000000e+06
+    },
+    {
+      "name": "BM_OB_Cancel_Mid",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_OB_Cancel_Mid",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 7273719,
+      "real_time": 3.4032353194871820e+02,
+      "cpu_time": 3.4291247091074990e+02,
+      "time_unit": "ns",
+      "max_ns": 3.4557091367969691e+05,
+      "min_ns": 1.5914392863026006e+01,
+      "p50_ns": 2.6041733775860738e+01,
+      "p999_ns": 1.6927126954309480e+02,
+      "p99_ns": 4.9189941576625834e+01,
+      "samples": 7.2737190000000000e+06
+    },
+    {
+      "name": "BM_OB_Cross_Sweep",
+      "family_index": 2,
+      "per_family_instance_index": 0,
+      "run_name": "BM_OB_Cross_Sweep",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 5124646,
+      "real_time": 5.5405059304297708e+02,
+      "cpu_time": 5.6127067684375800e+02,
+      "time_unit": "ns",
+      "fills_per_iter": 8.0000000000000000e+00,
+      "max_ns": 5.5163842966658913e+05,
+      "min_ns": 1.5046335070497315e+02,
+      "p50_ns": 1.8663242539366863e+02,
+      "p999_ns": 8.1308079900187408e+02,
+      "p99_ns": 4.2534831833905872e+02,
+      "samples": 5.1246460000000000e+06
+    }
+  ]
+}

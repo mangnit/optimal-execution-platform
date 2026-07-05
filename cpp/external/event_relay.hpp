@@ -109,7 +109,13 @@ class EventRelay {
           logger_.Log(event);
           processed_.fetch_add(1, std::memory_order_relaxed);
         }
-        logger_.Flush();
+        // Flush() is NOT called here — the IpcKdbLogger's underlying c.o
+        // client's first touch (arena/allocator init, mixed-list packing)
+        // segfaults from a spawned std::thread on some hosts (KXVER=3 c.o
+        // vs kdb+ 5.0 lazy-arena setup). Ownership: whoever called Start()
+        // is responsible for calling logger.Flush() themselves after Stop()
+        // returns — same-thread as Connect(), so c.o only ever runs on one
+        // thread. The in-memory logger's Flush() is a no-op anyway.
         return;
       }
       if (!got_any && idle_sleep_.count() > 0) {
