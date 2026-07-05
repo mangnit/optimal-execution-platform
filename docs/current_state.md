@@ -1,8 +1,28 @@
 # Current State
 
-**Phase:** P5.2 – Pybind11 bridge (oep_env module) — **COMPLETE**.
-Full `ctest` suite still passes **62/62** and `scripts/test_bridge.py`
-smoke tests are green end-to-end.
+**Phase:** P5.3 – Gymnasium wrapper (`ExecutionEnv`) — **COMPLETE**.
+Full `ctest` suite still passes **62/62**, `scripts/test_bridge.py`
+smoke tests are green, and `scripts/test_gym.py` now drives
+`gymnasium.utils.env_checker.check_env` cleanly against
+`ExecutionEnv`.
+
+- **Gymnasium wrapper** (`python/env/execution_env.py`,
+  `python/env/__init__.py`, `scripts/test_gym.py`): wrapped the C++
+  `oep_env.SimEnv` in a standard `gymnasium.Env` so Stable-Baselines3
+  can drive the engine unchanged. `ExecutionEnv` declares
+  `action_space = Box([0,1]^2, float32)` and
+  `observation_space = Box([-inf,inf]^8, float32)` per §5.4; `reset`
+  forwards the caller's seed (default `0xC0FFEEBABE`) into the C++
+  PRNG and returns `(obs, {})`; `step` calls into the bridge and
+  returns `(obs, reward, terminated=done(), truncated=False, {})`.
+  Both methods return the zero-copy view exposed by
+  `SimEnv.state()` — no per-step Python-side allocation, matching the
+  docs/architecture.md "host-to-device" boundary rule. `close()` drops the
+  SimEnv so its dtor stops the relay thread. `scripts/test_gym.py`
+  runs `check_env(skip_render_check=True)` with warnings escalated to
+  errors (only the informational "Box bound is ±infinity" note is
+  filtered, since those bounds are required by the task) and reports
+  **`test_gym: OK — ExecutionEnv passes gymnasium.check_env`**.
 
 - **Pybind11 bridge** (`cpp/bindings/py_module.cpp`,
   `CMakeLists.txt` gated on `-DOEP_BUILD_PYBIND=ON`,
