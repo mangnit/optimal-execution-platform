@@ -22,6 +22,8 @@
 #ifndef OEP_BENCHMARKS_BENCH_UTIL_HPP_
 #define OEP_BENCHMARKS_BENCH_UTIL_HPP_
 
+#include "core/tsc_clock.hpp"
+
 #include <benchmark/benchmark.h>
 
 #include <algorithm>
@@ -35,53 +37,14 @@
 #include <thread>
 #include <vector>
 
-#if defined(__x86_64__) || defined(_M_X64)
-#include <x86intrin.h>
-#define OEP_BENCH_HAVE_RDTSC 1
-#else
-#define OEP_BENCH_HAVE_RDTSC 0
-#endif
-
 namespace oep::bench {
 
-// Read the invariant TSC. rdtscp waits for prior instructions to retire, so
-// the sample brackets what we intended to measure and not a re-ordered tail.
-inline std::uint64_t ReadCycleCounter() noexcept {
-#if OEP_BENCH_HAVE_RDTSC
-  unsigned aux;
-  return __rdtscp(&aux);
-#else
-  // Portable fallback for non-x86 CI runners. Coarser, but correct.
-  return static_cast<std::uint64_t>(
-      std::chrono::steady_clock::now().time_since_epoch().count());
-#endif
-}
-
-// One-time TSC → nanosecond calibration. Runs a ~50ms wall-clock window and
-// counts cycles across it. Cached in a function-local static so subsequent
-// calls are free.
-inline double NanosPerCycle() {
-  static const double cached = [] {
-#if OEP_BENCH_HAVE_RDTSC
-    using clock = std::chrono::steady_clock;
-    const auto wall_start = clock::now();
-    const std::uint64_t tsc_start = ReadCycleCounter();
-    // Busy-spin ~50 ms; sleeping would let the scheduler migrate us.
-    while (clock::now() - wall_start < std::chrono::milliseconds(50)) {
-      benchmark::DoNotOptimize(ReadCycleCounter());
-    }
-    const std::uint64_t tsc_end = ReadCycleCounter();
-    const auto wall_end = clock::now();
-    const double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          wall_end - wall_start).count();
-    const double cycles = static_cast<double>(tsc_end - tsc_start);
-    return ns / cycles;
-#else
-    return 1.0;  // fallback: ReadCycleCounter already returns nanoseconds
-#endif
-  }();
-  return cached;
-}
+// The rdtsc primitive and its cycle→ns calibration live in core/tsc_clock.hpp
+// so the sim_runner / live_loop entry points can reach for them without
+// pulling in Google Benchmark. Re-exported into `oep::bench::` so existing
+// benchmark TUs (and any external callers) compile unchanged.
+using oep::core::NanosPerCycle;
+using oep::core::ReadCycleCounter;
 
 // Collects per-iteration cycle deltas and, on `Publish`, computes tail
 // percentiles into the benchmark's counters map. The vector is reserved up

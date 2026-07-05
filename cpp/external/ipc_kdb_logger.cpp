@@ -55,8 +55,11 @@ bool IpcKdbLogger::Connect() {
 
   // `khpu(host, port, credentials)`: >0 on success; 0 = bad auth; -1 = socket
   // failure; -2 = timeout. We collapse all failures to "not connected" so the
-  // relay just sees a boolean.
-  char* creds = credentials_.empty() ? nullptr : AsMutable(credentials_);
+  // relay just sees a boolean. The vendored client calls strlen() on the
+  // credentials pointer unconditionally, so an empty-but-non-null "" is the
+  // "no auth" contract — nullptr would segfault inside khpu.
+  static char kEmpty[] = "";
+  char* creds = credentials_.empty() ? kEmpty : AsMutable(credentials_);
   const int h = khpu(AsMutable(host_), port_, creds);
   if (h <= 0) {
     handle_ = 0;

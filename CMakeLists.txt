@@ -64,3 +64,14 @@ if(OEP_USE_KDB)
   )
   target_compile_definitions(oep_kdb_ipc PUBLIC OEP_USE_KDB=1 KXVER=3)
 endif()
+
+# Sim runner (task P3_sim_runner). Drives a deterministic synthetic workload
+# through OrderBook → TelemetryPublisher → SpscRing → EventRelay → KdbLogger
+# with the production TSC clock plumbed into TelemetryPublisher::ClockFn.
+# Links against the real IPC logger when OEP_USE_KDB=ON; otherwise falls back
+# to the in-memory sink so a `docker compose`-less checkout can still `run`.
+add_executable(sim_runner cpp/main/sim_runner.cpp)
+target_link_libraries(sim_runner PRIVATE oep_core pthread)
+if(OEP_USE_KDB)
+  target_link_libraries(sim_runner PRIVATE oep_kdb_ipc)
+endif()

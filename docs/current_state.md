@@ -1,10 +1,12 @@
 # Current State
 
-**Phase:** P2 – Event Loop & kdb+ logging — **COMPLETE (100%)**.
-Relay + logger interface, order-book → SPSC wiring, real `k.h` IPC
-logger, and `q/schema.q` pinned to the CSV header are all landed.
-Ready to open P3 (sim runner / live loop wiring the production TSC
-clock into `TelemetryPublisher::ClockFn`).
+**Phase:** P3 – Sim runner / live loop — **COMPLETE (100%)**.
+Production TSC clock plumbed into `TelemetryPublisher::ClockFn`, the
+`sim_runner` binary drives a deterministic seeded workload end-to-end
+through `OrderBook → TelemetryPublisher → SpscRing → EventRelay →
+KdbLogger`, and a first live run just closed **100 000 operations in
+17 ms with zero SPSC drops** against the in-memory sink. Ready to
+open P4 (TCA replay + core-isolated tail measurements).
 
 **Completed:**
 - Workspace directory initialization.
@@ -228,6 +230,65 @@ clock into `TelemetryPublisher::ClockFn`).
     without pulling in a full TP/RDB. The IpcKdbLogger already targets
     `.u.upd[`trade; ...]` so wiring is symmetric.
 
+- **Production TSC clock** (`cpp/core/tsc_clock.hpp`):
+  - Lifts the invariant-TSC primitives out of the bench harness so the
+    internal clock can be reached without pulling in
+    `<benchmark/benchmark.h>`. `ReadCycleCounter()` is a single
+    `__rdtscp` on x86-64 (lightly serialising — retires prior ops
+    before sampling), with a `steady_clock` fallback for non-x86 CI.
+  - `NanosPerCycle()` runs a one-shot ~50 ms busy-spin against
+    `steady_clock` and caches the ratio in a function-local static;
+    subsequent calls are free. Busy-spin (not `sleep_for`) keeps the
+    calibrating thread on-core so the scheduler can't migrate mid-window
+    and skew the ratio.
+  - `TscNanoClock` is a callable that satisfies
+    `TelemetryPublisher::ClockFn`: captures a base TSC reading at
+    construction so the emitted `ts_ns` values start near zero, keeping
+    `cycles * ns_per_cycle` inside `double`'s 53-bit exact-integer
+    window for the lifetime of any realistic session (~104 days).
+    `operator()` is one `rdtscp` plus a scalar float multiply — zero
+    allocation, zero syscalls on the hot path.
+  - `bench_util.hpp` now re-exports `oep::bench::ReadCycleCounter` /
+    `oep::bench::NanosPerCycle` as aliases of the core primitives, so
+    every existing benchmark TU compiles unchanged.
+
+- **Sim runner** (`cpp/main/sim_runner.cpp`, new `CMakeLists.txt`
+  target):
+  - Standalone executable that wires the full P1/P2 pipeline together
+    behind the production TSC clock: `OrderBook + TelemetryPublisher`
+    on the internal clock, `SpscRing<TelemetryEvent, 1<<16>` as the
+    drop-tolerant bridge, `EventRelay` + `KdbLogger` on the external
+    clock. Ring is heap-allocated once at startup (2.5 MiB frame is
+    too large for stack), never on the hot path.
+  - Workload is a seeded `xorshift64` mix of aggressive / passive
+    limit orders and 1-in-4 cancels — the same recipe the P2 zero-
+    allocation integration test uses, so the sim exercises exactly the
+    code paths already verified allocate-free. A narrow price band
+    (90..110) is prewarmed so resting inserts never trigger a
+    `std::map` node allocation after startup. Bit-identical PRNG
+    across libstdc++/libc++ satisfies the docs/architecture.md "identical seed
+    ⇒ identical fill sequence" determinism rule.
+  - Defensive slab-eviction guard cancels a resting order when
+    `open_order_count()` approaches `kBookCapacity`, so a normal run
+    never trips the `AddLimit(→false)` slab-exhaustion path.
+  - CLI: `--host / --port / --ops / --seed / --help`. Build picks the
+    sink at compile time — `-DOEP_USE_KDB=ON` links the real
+    `IpcKdbLogger` (and a failed `Connect()` is warned-not-fatal so
+    the relay still drains into the logger's per-column batches until
+    an operator brings the ticker plant up); otherwise falls back to
+    `InMemoryKdbLogger` so a `docker compose`-less checkout can still
+    `sim_runner` end-to-end.
+  - **First live run: 100 000 ops end-to-end in ~17 ms with zero SPSC
+    drops** through the in-memory sink — the wired hot path meets the
+    §2 architecture rule (producer never blocks on the relay) at
+    real workload volume, on top of the deterministic seed.
+  - Fixed a latent segfault in `IpcKdbLogger::Connect()` uncovered by
+    the sim run: the vendored `k.h` client calls `strlen()` on the
+    credentials pointer unconditionally, so a `nullptr` for the
+    "no auth" case dereferenced inside `khpu`. Collapsed to a static
+    empty-string sentinel — behavioural contract for KDB+ is
+    "empty string == no auth", not "null pointer".
+
 **Pending (deferred to later phases):**
 - `perf` cache/branch-miss numbers to sit alongside the p50/p99/p99.9 table
   (harness ready, needs a core-isolated Linux run — CI runner is shared
@@ -242,14 +303,14 @@ clock into `TelemetryPublisher::ClockFn`).
 
 **Bugs/Issues:** None.
 
-**Next Phase — P3 (sim runner / live loop).**
-1. Plumb the production TSC clock (bench_util's calibrated
-   nanosecond source) into `TelemetryPublisher::ClockFn` at the
-   `sim_runner` / `live_loop` entry points.
-2. Stand up the sim runner: deterministic seeded fill-sequence
-   driver against `OrderBook + TelemetryPublisher`, replayed
-   through the relay into either the in-memory (CI) sink or the
-   real `IpcKdbLogger` when a `q schema.q` ticker plant is up.
-3. Wire the live loop's external gateway boundary onto the same
-   external clock the relay + kdb+ logger already occupy — no
-   FIX I/O may leak onto the hot path.
+**Next Phase — P4 (TCA replay + core-isolated tail measurements).**
+1. Re-take the latency baseline on a core-isolated Linux host with
+   `OEP_BENCH_PIN_CPU` + `OEP_BENCH_PIN_CPU_CONSUMER` set and commit
+   the resulting `docs/latency_report.md` alongside the pinning notes.
+2. Stand up the TCA replay path: read the `trade` table off the
+   `q schema.q` ticker plant, reconstruct fills against arrival mid,
+   and compute IS with the docs/architecture.md sign convention (parent SELL of
+   Q over [0, T]).
+3. Wire the live loop's FIX gateway onto the external clock the relay
+   + KDB+ logger already occupy — no gateway I/O may leak onto the
+   hot path.
