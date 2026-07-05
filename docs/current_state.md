@@ -1,14 +1,49 @@
 # Current State
 
-**Phase:** P4 – TCA replay & clock-delta analysis — **COMPLETE**.
-Live end-to-end run against a stood-up `q schema.q -p 5010` plant
-delivered **94 907 events with zero dropped frames** through the
-full `OrderBook → TelemetryPublisher → SpscRing → EventRelay →
-IpcKdbLogger → kdb+ TP` pipeline; `q/tca_analysis.q` confirmed
-strict `seq` monotonicity and a landing-lag distribution with
-`max drift ≈ 56 ms` from the median (dominated by WSL2 scheduling
-tail — the constant TSC↔wall epoch offset drops out of the median
-subtraction by construction).
+**Phase:** P5.1 – Analytical execution baselines (Almgren–Chriss + VWAP)
+— **COMPLETE**. Full `ctest` suite passes **62/62**.
+
+- Implemented the Almgren–Chriss and VWAP analytical baselines as
+  zero-allocation CRTP strategies
+  ([cpp/exec/strategy.hpp](cpp/exec/strategy.hpp),
+  [cpp/exec/almgren_chriss.{hpp,cpp}](cpp/exec/almgren_chriss.hpp),
+  [cpp/exec/vwap.{hpp,cpp}](cpp/exec/vwap.hpp)). No virtual dispatch,
+  no exceptions, no RTTI on the hot path; the sinh urgency curve and
+  the cumulative-rounded VWAP schedule are pre-computed at construction
+  (external clock) so `ChildQuantity` / `RemainingAfterStep` collapse
+  to a single indexed vector read. κ = √(λσ²/η) is calculated once and
+  stored; λ→0 collapses cleanly to the TWAP linear limit. Both
+  schedules anchor Σ n_j ≡ Q by construction so integer rounding does
+  not drift close-out. `Strategy::SubmitStep` forwards through a
+  templated `Publisher::AddLimit` (matches `TelemetryPublisher`) so
+  child orders reach the SPSC ring with zero heap traffic — proven
+  by allocator-counter guards in the two new gtests
+  ([cpp/tests/almgren_chriss_test.cpp](cpp/tests/almgren_chriss_test.cpp),
+  [cpp/tests/vwap_test.cpp](cpp/tests/vwap_test.cpp), 14 cases total
+  covering the κ formula, boundary anchors, monotonicity, λ→0 = TWAP,
+  large-λ front-loading, a hand-computed N=4 schedule, cumulative-round
+  VWAP, sub-unit profile close-out, hot-path zero-alloc, and the
+  end-to-end `SubmitStep → TelemetryPublisher → SpscRing` Ack
+  round-trip).
+- **Fixed [cpp/tests/relay_test.cpp](cpp/tests/relay_test.cpp)** to
+  match the Phase 4 threading contract: `EventRelay`'s consumer thread
+  no longer calls `logger_.Flush()` (kdb+ 5.0 C-API is not thread-safe
+  from a thread other than the one that opened the handle — see the
+  P4 fix in [event_relay.hpp:112](cpp/external/event_relay.hpp#L112)),
+  so the `DrainsBurstOfEventsInFifoOrder` test now calls
+  `logger.Flush()` explicitly from the main thread after
+  `relay.Stop()` returns before asserting `flush_count() >= 1`.
+  Aligns the test with the new ownership rule without changing the
+  KDB+ segfault-safe production path.
+
+**Prior phase snapshot (P4, complete):** Live end-to-end run against
+a stood-up `q schema.q -p 5010` plant delivered **94 907 events with
+zero dropped frames** through the full `OrderBook →
+TelemetryPublisher → SpscRing → EventRelay → IpcKdbLogger → kdb+ TP`
+pipeline; `q/tca_analysis.q` confirmed strict `seq` monotonicity and
+a landing-lag distribution with `max drift ≈ 56 ms` from the median
+(dominated by WSL2 scheduling tail — the constant TSC↔wall epoch
+offset drops out of the median subtraction by construction).
 
 **KDB+ 5.0 compatibility fixes required to close the loop:**
 - **Main-thread `Flush()` refactor** ([cpp/external/event_relay.hpp:112](cpp/external/event_relay.hpp#L112)):

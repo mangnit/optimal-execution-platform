@@ -53,9 +53,31 @@ target_link_libraries(system_integration_test
     pthread
 )
 
+add_executable(almgren_chriss_test almgren_chriss_test.cpp)
+target_link_libraries(almgren_chriss_test
+  PRIVATE
+    oep_core
+    oep_exec
+    GTest::gtest
+    GTest::gtest_main
+    pthread
+)
+
+add_executable(vwap_test vwap_test.cpp)
+target_link_libraries(vwap_test
+  PRIVATE
+    oep_core
+    oep_exec
+    GTest::gtest
+    GTest::gtest_main
+    pthread
+)
+
 include(GoogleTest)
 gtest_discover_tests(slab_allocator_test)
 gtest_discover_tests(spsc_ring_test)
 gtest_discover_tests(order_book_test)
 gtest_discover_tests(relay_test)
 gtest_discover_tests(system_integration_test)
+gtest_discover_tests(almgren_chriss_test)
+gtest_discover_tests(vwap_test)

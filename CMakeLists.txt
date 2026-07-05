@@ -22,6 +22,15 @@ add_compile_options($<$<CONFIG:Release>:-march=native>)
 add_library(oep_core INTERFACE)
 target_include_directories(oep_core INTERFACE ${CMAKE_SOURCE_DIR}/cpp)
 
+# Execution baselines (Almgren-Chriss, VWAP — task P5). Static library because
+# the schedule ctors carry `<cmath>` and non-trivial state; keeping the .cpp
+# out of headers lets the CRTP call sites in strategy.hpp stay header-only.
+add_library(oep_exec STATIC
+  cpp/exec/almgren_chriss.cpp
+  cpp/exec/vwap.cpp
+)
+target_link_libraries(oep_exec PUBLIC oep_core)
+
 enable_testing()
 add_subdirectory(cpp/tests)
 

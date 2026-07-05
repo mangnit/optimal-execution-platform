@@ -97,6 +97,12 @@ TEST(EventRelay, DrainsBurstOfEventsInFifoOrder) {
   EXPECT_FALSE(relay.running());
   EXPECT_EQ(relay.processed(), kBurst);
 
+  // Post-P4 ownership rule: Flush() is called only by the main thread once
+  // Stop() has returned. The relay's consumer thread no longer touches
+  // logger_.Flush() because the KDB+ 5.0 C-API is not thread-safe from the
+  // side that opened the handle — Phase 4 moved that call here.
+  logger.Flush();
+
   const auto rows = logger.Snapshot();
   ASSERT_EQ(rows.size(), kBurst);
   for (std::uint64_t i = 0; i < kBurst; ++i) {
