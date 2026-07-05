@@ -20,3 +20,6 @@ compile_commands.json
 __pycache__/
 *.pyc
 .venv/
+
+models/
+logs/

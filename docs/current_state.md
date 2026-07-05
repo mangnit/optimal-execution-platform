@@ -1,10 +1,34 @@
 # Current State
 
-**Phase:** P5.3 – Gymnasium wrapper (`ExecutionEnv`) — **COMPLETE**.
+**Phase:** P5.4 – SAC training loop (`train_sac.py`) — **COMPLETE**.
 Full `ctest` suite still passes **62/62**, `scripts/test_bridge.py`
-smoke tests are green, and `scripts/test_gym.py` now drives
-`gymnasium.utils.env_checker.check_env` cleanly against
-`ExecutionEnv`.
+and `scripts/test_gym.py` smoke tests are green, and
+`python -m train.train_sac` now drives Stable-Baselines3 SAC end-to-end
+against four parallel C++ SimEnv workers.
+
+- **SAC training loop** (`python/train/train_sac.py`,
+  `python/train/__init__.py`): wired Stable-Baselines3 SAC to
+  `ExecutionEnv` behind a `SubprocVecEnv` of N=4 workers, closing out
+  the P5 stack (§5.4). Each rank gets a distinct seed
+  (`_DEFAULT_TRAIN_SEED + rank`) so the four subprocesses explore
+  decorrelated trajectories rather than N copies of the same episode;
+  a single-process `DummyVecEnv` on `_DEFAULT_EVAL_SEED` backs the
+  `EvalCallback` so eval numbers stay reproducible across runs.
+  `SubprocVecEnv` correctly spun up four parallel C++ environments
+  without hanging — proving the `py::gil_scoped_release` in the P5.2
+  bridge is flawless (a single missed release would have serialised
+  all four workers behind the interpreter lock). `learn()` returned
+  cleanly; the run dropped a `.zip` model artifact to
+  `models/sac_oep_baseline.zip` and TensorBoard traces to `logs/` (both
+  paths configurable via `--model-path` / `--log-dir`). CLI knobs
+  (`--n-envs`, `--total-timesteps`, `--eval-freq`, `--n-eval-episodes`,
+  `--seed`, `--eval-seed`) let the same script serve as both the P5.4
+  smoke test and the entry point for a fuller sweep. `models/` and
+  `logs/` are `.gitignore`d — training artifacts do not belong in the
+  tree.
+
+**Prior phase snapshot (P5.3, complete):** `scripts/test_gym.py` drives
+`gymnasium.utils.env_checker.check_env` cleanly against `ExecutionEnv`.
 
 - **Gymnasium wrapper** (`python/env/execution_env.py`,
   `python/env/__init__.py`, `scripts/test_gym.py`): wrapped the C++
