@@ -98,6 +98,8 @@ def main() -> int:
             buffer_size=50_000,
             batch_size=256,
             learning_starts=1_000,
+            learning_rate=1e-4,
+            ent_coef="auto",
         )
 
         # SB3 divides eval_freq by n_envs internally for SubprocVecEnv.

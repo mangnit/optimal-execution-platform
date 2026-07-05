@@ -1,5 +1,29 @@
 # Current State
 
+**Latest tuning pass — training stability (2026-07-05):** three changes
+to stop the supervisor's early-stopping trigger from killing SAC runs
+during transient dips.
+
+- **SAC hyperparameters** (`python/train/train_sac.py`): pinned
+  `learning_rate=1e-4` (down from SB3's default 3e-4) on the SAC
+  constructor and kept `ent_coef="auto"` explicit so the entropy
+  temperature is auto-tuned rather than left implicit. Smaller step
+  size trades convergence speed for a smoother `ep_rew_mean` curve,
+  which is what the plateau detector actually looks at.
+- **Early-stopping patience** (`python/train/supervisor.py`):
+  `_PLATEAU_PATIENCE` raised from 10 → 50 consecutive eval intervals
+  without improvement. Gives the agent 5× the runway to climb out of
+  the negative-reward spirals we were seeing on short smoke runs.
+  Memory-leak detector and status heartbeat unchanged.
+- **Inventory penalty** (`cpp/bindings/py_module.cpp`): `kPhi`
+  cut 0.5f → 0.25f in `StepImpl` — the φ·(q/Q)² running cost
+  is now half as steep, so the shortfall term dominates by a
+  wider margin during exploration and the agent is less
+  "stressed" about carrying inventory mid-episode. Requires a
+  pybind rebuild (`cmake --build build --target oep_env`) before
+  the change is picked up by the trainer; no other C++ TU
+  depends on this constant.
+
 **Phase:** P6.1 – Execution Cockpit (`python/cockpit/app.py`) — **COMPLETE**.
 Streamlit-based dashboard drives the C++ engine through the Pybind11
 bridge, runs SAC vs TWAP head-to-head from the sidebar, and renders

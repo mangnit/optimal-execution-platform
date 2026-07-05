@@ -314,7 +314,7 @@ class SimEnv {
     // Inventory holding penalty φ · (q/Q)^2 — a modest running cost that
     // matches §5.4. φ chosen small so the shortfall term dominates in the
     // smoke test.
-    constexpr float kPhi = 0.5f;
+    constexpr float kPhi = 0.25f;
     const float inv_frac = static_cast<float>(remaining_) /
                            static_cast<float>(parent_qty_);
     reward -= kPhi * inv_frac * inv_frac;
