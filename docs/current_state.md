@@ -1,10 +1,42 @@
 # Current State
 
-**Phase:** P5.5 – TorchScript export (`export_torchscript.py`) — **COMPLETE**.
-Full `ctest` suite still passes **62/62**, `scripts/test_bridge.py`
-and `scripts/test_gym.py` smoke tests are green, and
-`python3 python/train/export_torchscript.py` now emits a native
-`models/sac_policy.pt` ready for the C++ LibTorch loader.
+**Phase:** P6.1 – Execution Cockpit (`python/cockpit/app.py`) — **COMPLETE**.
+Streamlit-based dashboard drives the C++ engine through the Pybind11
+bridge, runs SAC vs TWAP head-to-head from the sidebar, and renders
+per-step fill-price / cum-avg traces against arrival mid with live
+IS-bps KPI tiles.
+
+- **Execution Cockpit** (`python/cockpit/app.py`,
+  `python/cockpit/requirements.txt`): built the Streamlit-based
+  cockpit that closes the Phase 6 §6.1 loop — sidebar drives
+  `parent_qty` / `horizon_steps` / `arrival_mid` / `seed` and a policy
+  selector (SAC when `models/sac_oep_baseline.zip` is present, else
+  TWAP / Random), the "Run Execution" button plays two episodes
+  (chosen policy + TWAP baseline) through `ExecutionEnv` at the same
+  seed, and results are surfaced as (i) four KPI tiles — policy IS
+  (bps), TWAP IS (bps), Δ vs TWAP, and filled/parent with the
+  realised average fill — and (ii) a Plotly overlay of per-step fill
+  price and cumulative-average price for both policies against a
+  dashed arrival-mid reference. Sign convention pinned to docs/architecture.md:
+  parent SELL of Q, IS as `(S₀ − avg_fill) / S₀` in bps with unfilled
+  inventory marked at S₀ so the metric is comparable across episodes
+  even when the child sweep doesn't empty the book. TWAP baseline
+  uses `size_frac = 1 / (T − t)` at aggression 1 so the C++ engine
+  (which interprets `size_frac` as a fraction of `remaining_`) sweeps
+  a uniform absolute size across the horizon; end-to-end smoke run
+  through the app confirmed the engine loads, both episodes complete,
+  and the Plotly analytics render live. `stable_baselines3` import is
+  behind a try/except so the app degrades to TWAP/Random when SB3 (or
+  the `.zip` artifact) is absent — cockpit stays runnable from a
+  fresh checkout that hasn't trained yet. `models/` stays
+  `.gitignore`d — the cockpit reads the artifact if present, but the
+  binary itself is not tracked.
+
+**Prior phase snapshot (P5.5, complete):** Full `ctest` suite passes
+**62/62**, `scripts/test_bridge.py` and `scripts/test_gym.py` smoke
+tests are green, and `python3 python/train/export_torchscript.py`
+emits a native `models/sac_policy.pt` ready for the C++ LibTorch
+loader.
 
 - **TorchScript export** (`python/train/export_torchscript.py`):
   extracted the SAC actor from `models/sac_oep_baseline.zip`, wrapped

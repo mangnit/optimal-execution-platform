@@ -1,0 +1,4 @@
+streamlit>=1.36
+plotly>=5.20
+pandas>=2.0
+stable-baselines3>=2.4
