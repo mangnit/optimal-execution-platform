@@ -56,6 +56,31 @@ Key code anchors:
   decay of resting liquidity would make steady (TWAP-like) execution win and de-fang the
   terminal-dump strategy. This, not more RL tuning, is the next lever for realistic behavior.
 
+## 1c. Liquidity churn fix (post-Trial-5, IMPLEMENTED)
+
+`py_module.cpp`: age-based FIFO expiry of background orders. New
+`kLiquidityLifetimeSteps=3`; churn FIFO members `bg_ids_`/`bg_birth_`/`bg_head_`
+(reserved, allocation-free, index-dequeue); churn loop at top of `StepImpl`
+(cancel born ≤ `step_idx_−L`); register (id,step) on rest; cleared in ResetInternal.
+Seed-determinism preserved (ctest 69/69). **Mechanic note:** the aggressive child
+sells at `best_bid_now` = TOP bid price only, so a cross takes only the top level,
+not a deep sweep — churn therefore starves the accumulate-at-99 hoard.
+
+**Probe (fixed policy, churned):** twap_aggr **−124.8 / 1000 fills (now WINNER)**;
+do_nothing & all_passive collapse to **59 fills / −978** (hoard-and-dump DEAD);
+all_aggressive −429. Realistic Almgren-Chriss landscape achieved.
+
+**TWAP baseline to beat (churned env), per seed:**
+| seed | TWAP reward | fills |
+|------|------------|-------|
+| 0xC0FFEEBABE | −124.8 | 1000 |
+| 0xDEADBEEF | −147.5 | 986 |
+| **0x1234 (hard)** | **−247.7** | **921** |
+
+Even TWAP under-fills 0x1234 (921) → learned policy has room to beat it by adapting
+size/aggression to book state. Training with churn: run 200k direct (vecnorm saved
+at end); eval `scratchpad/eval_vecnorm.py`, baseline `scratchpad/twap_baseline.py`.
+
 ## 2. Current Baseline Metrics (fixed-policy fill ceiling)
 
 Driven straight through built `oep_env.SimEnv` (parent_qty=1000, horizon=32, mid=100,

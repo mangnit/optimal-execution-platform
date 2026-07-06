@@ -77,6 +77,13 @@ constexpr std::size_t kActionDim = 2;
 constexpr float kPhi = 1.0f;  // TRIAL 3: 0.25→1.0, urgency knob (front-load)
 constexpr double kTerminalStressTicks = 10.0;
 
+// Background-liquidity churn (post-Trial-5 realism fix): a resting synthetic
+// order survives this many steps, then expires. Bounds standing book depth so
+// depth cannot accumulate over an idle horizon — waiting no longer improves the
+// achievable fill price, so the reward-optimal policy must actively consume
+// liquidity as it arrives instead of hoarding and dumping at T.
+constexpr std::size_t kLiquidityLifetimeSteps = 3;
+
 // Deterministic PRNG (xorshift64) — bit-identical to sim_runner.cpp so a
 // shared seed produces the same exogenous flow in both drivers.
 class Xorshift64 {
@@ -202,6 +209,9 @@ class SimEnv {
       (void)publisher_.Cancel(id);
     }
     resting_ids_.clear();
+    bg_ids_.clear();
+    bg_birth_.clear();
+    bg_head_ = 0;
 
     remaining_ = parent_qty_;
     step_idx_ = 0;
@@ -217,6 +227,17 @@ class SimEnv {
   float StepImpl(float size_frac, float aggression) {
     if (done_) {
       return 0.0f;
+    }
+
+    // 0) Liquidity churn: expire synthetic orders older than the lifetime so
+    //    standing depth stays bounded (kLiquidityLifetimeSteps). Head-index
+    //    dequeue over the birth-ordered FIFO — amortised O(1), allocation-free.
+    //    Cancel of an already-consumed id is a safe no-op. Deterministic in
+    //    step_idx_ + insertion order, so the seeded-fill guarantee holds.
+    while (bg_head_ < bg_ids_.size() &&
+           bg_birth_[bg_head_] + kLiquidityLifetimeSteps <= step_idx_) {
+      (void)publisher_.Cancel(bg_ids_[bg_head_]);
+      ++bg_head_;
     }
 
     // 1) Background flow: a small burst of synthetic maker/taker orders to
@@ -251,6 +272,10 @@ class SimEnv {
         // implicitly — a fully-aggressive order rested nothing, but tracking
         // its id here is still safe: Cancel on an unknown id is a no-op).
         resting_ids_.push_back(id);
+        // Register with the churn FIFO so it expires kLiquidityLifetimeSteps
+        // from now (birth = current step).
+        bg_ids_.push_back(id);
+        bg_birth_.push_back(step_idx_);
       }
     }
 
@@ -433,6 +458,22 @@ class SimEnv {
     v.reserve(kBookCapacity);
     return v;
   }();
+
+  // Background-liquidity churn FIFO: (id, birth-step) of every synthetic order
+  // we rest, dequeued from `bg_head_` once older than kLiquidityLifetimeSteps.
+  // Both vectors reserved once so the hot path never allocates (matches
+  // resting_ids_); cleared per episode in ResetInternal.
+  std::vector<oep::core::OrderId> bg_ids_ = [] {
+    std::vector<oep::core::OrderId> v;
+    v.reserve(kBookCapacity);
+    return v;
+  }();
+  std::vector<std::size_t> bg_birth_ = [] {
+    std::vector<std::size_t> v;
+    v.reserve(kBookCapacity);
+    return v;
+  }();
+  std::size_t bg_head_ = 0;
 
   alignas(64) float state_buf_[kStateDim] = {0.0f};
   py::array_t<float> state_np_;

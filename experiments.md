@@ -61,6 +61,31 @@ Trials run at `--total-timesteps 200000` (see research_state.md §3 for rational
 | 2 | Reward structure (pivoted from IOC) | non-dodgeable holding penalty on `child_qty==0`; terminal step forces marketable cross; unsold-at-T marked-to-liquidation at `S₀−10` (`kTerminalStressTicks`) | −107.75 (eval seed); train ep_rew_mean −124 | **1000/1000** (2/3 seeds; 531 on seed 0x1234) | **SUCCESS — execution restored, reward-hack dead (0→1000 fills).** Trained policy completes 1000/1000 at avg 99.0 (IS≈100 bps) on eval seed. −107.75 is the env's patient optimum (passive fills impossible → avg>99 unreachable); eval metric saturated by ~20k. Residual: leans on terminal dump (`aggr≈0.44`) so under-fills the hardest seed → cross-seed robustness + urgency are the levers for Trials 3–5. |
 | 3 | Inventory penalty kPhi | `kPhi` 0.25→**1.0** (urgency knob) | −131 (patient basin); train −149 | 1000/1000 (2/3; 531 on 0x1234) | **φ confirmed as urgency control but SAC can't exploit it.** Probe: φ=1.0 flips fixed-policy optimum (twap −120.7 **>** do_nothing −131) → active execution *should* win. But SAC stays in the passive/terminal-dump basin (learned `size≈0.014, aggr≈0.168`; `remaining` flat at 1.00 until T). Higher φ only made reward more negative w/o changing behavior. **Bottleneck moved to SAC optimization/exploration** (premature collapse to passive after early aggressive crosses score −432). φ=1.0 kept (sets the incentive); T4/T5 target the optimization. |
 | 4 | Learning rate | `learning_rate` 1e-4→**3e-4** | −131 (patient basin); train −147 | 1000/1000 (2/3; 531 on 0x1234) | **Step-size is not the constraint.** Same passive basin; `aggr` collapsed even harder to **0.000**, `remaining` flat at 1.00. Higher LR reaches the same local optimum faster. Confirms the blocker is reward/obs *conditioning*, not gradient step size → Trial 5. |
+| 5 | Obs/reward normalization | `VecNormalize(norm_obs+norm_reward)` in train_sac.py | −131.8 (eval seed); train −? | 1000/1000 (2/3; 467 on 0x1234) | **Escaped the passive basin.** Active schedule (`remaining` 1.00→0.13, `size≈0.52 aggr≈0.46`), completes 1000/1000 on 2/3 seeds at avg 98.9 (IS≈110bps). Blocker was reward/obs conditioning, not φ/LR. Still leans on liquidity accumulation (env artifact) → churn fix below. |
+
+### Post-Trial-5: Liquidity churn (env realism)
+
+Age-based FIFO expiry of background orders (`kLiquidityLifetimeSteps=3`) so
+resting bids expire and depth can't accumulate over an idle horizon. `ctest 69/69`.
+
+**Fixed-policy probe (churned):** twap_aggr −124.8 / **1000 fills (now WINNER)**;
+do_nothing & all_passive collapse to **59 fills / −978** (hoard-and-dump DEAD);
+all_aggressive −429. Realistic Almgren-Chriss landscape.
+
+**Churn-trained SAC (200k, full config) vs TWAP, per seed:**
+
+| Seed | Agent reward / fills | TWAP reward / fills | Winner |
+|------|----------------------|---------------------|--------|
+| 0xC0FFEEBABE | −238.9 / 1000 | −124.8 / 1000 | TWAP |
+| 0xDEADBEEF | −415.2 / 806 | −147.5 / 986 | TWAP |
+| **0x1234 (hard)** | **−223.3 / 998** | **−247.7 / 921** | **AGENT ✅** |
+
+**Verdict:** Churn forces genuine active execution (`remaining` 1.00→0.02, `aggr≈0.69`) —
+hoard-and-dump permanently dead. **The agent beats TWAP on the hard seed 0x1234 on
+both reward and fills.** But it is NOT yet uniformly better: over-crosses on easy
+seeds (avg 97.7 vs TWAP 98.9) and under-fills 0xDEADBEEF (806). Under-trained (200k
+CPU, ep_rew_mean still climbing −452→−216). Next: longer training + φ/reward re-tune
+on the churned env to generalize the aggression across liquidity regimes.
 | 5 | Normalization | `VecNormalize(norm_obs=True, norm_reward=True, clip_obs=10)` on train; frozen shared-stats eval; persist `vecnormalize.pkl` (run direct, not via supervisor, to survive the post-`learn()` save) | −131.8 / −126.6 (2 seeds); −603 (0x1234) | **1000/1000** (2/3); 467 on 0x1234 | **Escapes the passive basin — active execution learned.** `remaining` now declines mid-episode (1.00→0.13; `size≈0.52, aggr≈0.46`) instead of flat-at-1.00. Completes 1000/1000 on 2/3 seeds at avg ~98.9 (IS ~110 bps). Confirms the T3/T4 diagnosis (blocker = reward/obs conditioning). Residual: under-fills hardest seed (cross-seed robustness), and raw reward ≈ patient because active crossing walks the book down slightly. |
 
 ---
