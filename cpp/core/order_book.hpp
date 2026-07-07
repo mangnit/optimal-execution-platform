@@ -7,13 +7,21 @@
 // O(1) regardless of its position in the queue. Cancel-by-id is O(1) too: an
 // open-addressing hash table (id_index_) maps OrderId → Order*, uses splitmix
 // for its hash, and back-shifts on erase so it never accumulates tombstones.
-// The price ladder is std::map<Price, LevelFIFO> (greater<> for bids,
-// less<> for asks) with a PrewarmLevel() hook that pre-inserts empty levels
-// during setup so hot-path resting inserts never trigger a map node
-// allocation. Empty levels are retained and skipped when scanning; that keeps
-// the ladder allocation-free after warmup at the price of a bounded skip when
-// matching walks through prewarmed-but-idle levels — fine for the tests and
-// for real books where the density of idle levels near the touch is small.
+// The price ladder is a direct-indexed array: one contiguous
+// std::vector<LevelFIFO> per side spanning a fixed price band
+// [min_price, max_price], preallocated at construction. Level lookup is a
+// single subtract-and-index (no tree walk, no hashing, no allocation, cache
+// lines laid out in price order), and the best bid/ask are tracked
+// incrementally: maintained on insert, and repaired after a level empties by
+// a short contiguous scan toward worse prices — bounded by the band and, in
+// practice, by the distance to the next populated level near the touch. A
+// per-side live-level counter short-circuits the scan entirely on an empty
+// side, making has_bid()/best_bid() O(1) reads. Prices outside the band
+// cannot rest (the residual is dropped and AddLimit returns false — the same
+// drop-on-full policy as slab exhaustion); matching against resting orders
+// is unaffected since it only compares prices. This replaces the original
+// std::map ladder, whose node-hopping best-of scans dominated the
+// AddLimit p99 (docs/latency_report.md).
 // Matching is standard price/time priority; fills are delivered synchronously
 // via a templated FillHandler so the caller can plumb them straight into the
 // SPSC ring without virtual dispatch.
@@ -27,9 +35,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <map>
-#include <utility>
 #include <vector>
 
 namespace oep::core {
@@ -73,37 +78,53 @@ struct LevelFIFO {
 
 class OrderBook {
  public:
+  // Default price band for the direct-indexed ladder. Wide enough for every
+  // in-tree workload (sim/env prices ~80–120, bench ladders at ~10 000) at
+  // a construction-time cost of band × 2 sides × sizeof(LevelFIFO) ≈ 1 MiB.
+  // Narrow it via the constructor for tighter cache residency.
+  static constexpr Price kDefaultMinPrice = 0;
+  static constexpr Price kDefaultMaxPrice = 16'383;
+
   // `order_capacity` bounds the number of simultaneously resting orders. The
   // id-index is sized to the next power of two ≥ 2×capacity so linear probing
-  // stays under a 50% load factor (fast, few probes).
-  explicit OrderBook(std::size_t order_capacity)
+  // stays under a 50% load factor (fast, few probes). `[min_price, max_price]`
+  // is the inclusive band the ladder can rest orders in; both vectors are
+  // fully allocated here so the hot path never allocates.
+  explicit OrderBook(std::size_t order_capacity,
+                     Price min_price = kDefaultMinPrice,
+                     Price max_price = kDefaultMaxPrice)
       : slab_(order_capacity),
+        min_price_(min_price),
+        max_price_(max_price),
+        bid_levels_(static_cast<std::size_t>(max_price - min_price + 1)),
+        ask_levels_(static_cast<std::size_t>(max_price - min_price + 1)),
         id_capacity_(RoundUpPow2(
             std::max<std::size_t>(order_capacity, 1) * 2)),
         id_mask_(id_capacity_ - 1),
-        id_index_(id_capacity_) {}
+        id_index_(id_capacity_) {
+    assert(max_price >= min_price);
+  }
 
   OrderBook(const OrderBook&) = delete;
   OrderBook& operator=(const OrderBook&) = delete;
   OrderBook(OrderBook&&) = delete;
   OrderBook& operator=(OrderBook&&) = delete;
 
-  // Reserve a slot in the price ladder for `price` on `side`. Meant for
-  // setup: pre-inserting the levels the hot path will use prevents std::map
-  // node allocations from happening once the workload starts.
+  // Setup-time hook, retained for API compatibility with the std::map ladder
+  // (which needed levels pre-inserted to avoid hot-path node allocations).
+  // The array ladder preallocates every in-band level at construction, so
+  // this is now a no-op beyond validating the price is inside the band.
   void PrewarmLevel(Side side, Price price) {
-    if (side == Side::kBuy) {
-      bids_.try_emplace(price);
-    } else {
-      asks_.try_emplace(price);
-    }
+    (void)side;
+    (void)price;
+    assert(InBand(price));
   }
 
   // Add a limit order. Matches greedily against the opposite side while the
   // taker's price crosses, then rests any remainder as a resting limit at
-  // `price`. Returns true on success; false only when the slab is exhausted
-  // and a residual would otherwise need to rest (the drop-on-full policy
-  // mirrors SpscRing::TryPush — never block).
+  // `price`. Returns true on success; false only when a residual would need
+  // to rest and cannot — slab exhausted, or `price` outside the ladder band
+  // (the drop-on-full policy mirrors SpscRing::TryPush — never block).
   //
   // FillHandler is called synchronously as `on_fill(const Fill&)` for each
   // maker/taker pair. Templated so a lambda or SPSC-push functor is inlined
@@ -142,8 +163,11 @@ class OrderBook {
       return false;
     }
     on_cancel(o->id, o->side, o->price, o->qty);
-    LevelFIFO& lvl = LevelForSide(o->side, o->price);
+    LevelFIFO& lvl = LevelAt(o->side, o->price);
     UnlinkFromLevel(lvl, o);
+    if (lvl.empty()) {
+      MarkLevelEmptied(o->side, o->price);
+    }
     slab_.Deallocate(o);
     return true;
   }
@@ -152,63 +176,36 @@ class OrderBook {
     return Cancel(id, [](OrderId, Side, Price, Quantity) noexcept {});
   }
 
-  // Observers. All O(active-empty-levels) in the worst case; for a healthy
-  // book with few idle prewarmed levels near the touch, effectively O(1).
-  bool has_bid() const noexcept {
-    for (const auto& kv : bids_) {
-      if (!kv.second.empty()) return true;
-    }
-    return false;
-  }
-  bool has_ask() const noexcept {
-    for (const auto& kv : asks_) {
-      if (!kv.second.empty()) return true;
-    }
-    return false;
-  }
+  // Observers. All O(1): the best prices are maintained incrementally by
+  // insert / cancel / match, never recomputed by scanning on read.
+  bool has_bid() const noexcept { return live_bid_levels_ > 0; }
+  bool has_ask() const noexcept { return live_ask_levels_ > 0; }
   Price best_bid() const noexcept {
-    for (const auto& kv : bids_) {
-      if (!kv.second.empty()) return kv.first;
-    }
-    return 0;
+    return live_bid_levels_ > 0 ? best_bid_px_ : 0;
   }
   Price best_ask() const noexcept {
-    for (const auto& kv : asks_) {
-      if (!kv.second.empty()) return kv.first;
-    }
-    return 0;
+    return live_ask_levels_ > 0 ? best_ask_px_ : 0;
   }
   Quantity level_qty(Side side, Price price) const noexcept {
-    if (side == Side::kBuy) {
-      auto it = bids_.find(price);
-      return (it == bids_.end()) ? 0 : it->second.total_qty;
-    }
-    auto it = asks_.find(price);
-    return (it == asks_.end()) ? 0 : it->second.total_qty;
+    if (!InBand(price)) return 0;
+    return (side == Side::kBuy ? bid_levels_ : ask_levels_)[Idx(price)]
+        .total_qty;
   }
   std::uint32_t level_order_count(Side side, Price price) const noexcept {
-    if (side == Side::kBuy) {
-      auto it = bids_.find(price);
-      return (it == bids_.end()) ? 0 : it->second.order_count;
-    }
-    auto it = asks_.find(price);
-    return (it == asks_.end()) ? 0 : it->second.order_count;
+    if (!InBand(price)) return 0;
+    return (side == Side::kBuy ? bid_levels_ : ask_levels_)[Idx(price)]
+        .order_count;
   }
   const LevelFIFO* level(Side side, Price price) const noexcept {
-    if (side == Side::kBuy) {
-      auto it = bids_.find(price);
-      return (it == bids_.end()) ? nullptr : &it->second;
-    }
-    auto it = asks_.find(price);
-    return (it == asks_.end()) ? nullptr : &it->second;
+    if (!InBand(price)) return nullptr;
+    return &(side == Side::kBuy ? bid_levels_ : ask_levels_)[Idx(price)];
   }
   std::size_t open_order_count() const noexcept { return slab_.in_use(); }
   std::size_t slab_capacity() const noexcept { return slab_.capacity(); }
+  Price min_price() const noexcept { return min_price_; }
+  Price max_price() const noexcept { return max_price_; }
 
  private:
-  using BidLadder = std::map<Price, LevelFIFO, std::greater<Price>>;
-  using AskLadder = std::map<Price, LevelFIFO, std::less<Price>>;
-
   struct IdEntry {
     OrderId id = 0;
     Order* ptr = nullptr;
@@ -229,15 +226,57 @@ class OrderBook {
     return x ^ (x >> 31);
   }
 
-  LevelFIFO& LevelForSide(Side side, Price price) noexcept {
+  bool InBand(Price px) const noexcept {
+    return px >= min_price_ && px <= max_price_;
+  }
+  std::size_t Idx(Price px) const noexcept {
+    return static_cast<std::size_t>(px - min_price_);
+  }
+  LevelFIFO& LevelAt(Side side, Price px) noexcept {
+    assert(InBand(px));
+    return (side == Side::kBuy ? bid_levels_ : ask_levels_)[Idx(px)];
+  }
+
+  // A level transitioned empty → populated. Maintain the incremental best:
+  // a bid improves the touch when higher, an ask when lower.
+  void MarkLevelLive(Side side, Price px) noexcept {
     if (side == Side::kBuy) {
-      auto it = bids_.find(price);
-      assert(it != bids_.end());
-      return it->second;
+      if (live_bid_levels_ == 0 || px > best_bid_px_) {
+        best_bid_px_ = px;
+      }
+      ++live_bid_levels_;
+    } else {
+      if (live_ask_levels_ == 0 || px < best_ask_px_) {
+        best_ask_px_ = px;
+      }
+      ++live_ask_levels_;
     }
-    auto it = asks_.find(price);
-    assert(it != asks_.end());
-    return it->second;
+  }
+
+  // A level transitioned populated → empty. If it carried the touch, repair
+  // by scanning toward worse prices over the contiguous ladder. The live
+  // counter guarantees termination before the band edge whenever any level
+  // remains; an emptied side skips the scan entirely.
+  void MarkLevelEmptied(Side side, Price px) noexcept {
+    if (side == Side::kBuy) {
+      --live_bid_levels_;
+      if (live_bid_levels_ > 0 && px == best_bid_px_) {
+        Price p = px;
+        do {
+          --p;
+        } while (bid_levels_[Idx(p)].empty());
+        best_bid_px_ = p;
+      }
+    } else {
+      --live_ask_levels_;
+      if (live_ask_levels_ > 0 && px == best_ask_px_) {
+        Price p = px;
+        do {
+          ++p;
+        } while (ask_levels_[Idx(p)].empty());
+        best_ask_px_ = p;
+      }
+    }
   }
 
   void InsertId(OrderId id, Order* o) noexcept {
@@ -325,13 +364,15 @@ class OrderBook {
   template <typename FillHandler>
   Quantity MatchBuy(OrderId taker_id, Price taker_price, Quantity remaining,
                     FillHandler& on_fill) {
-    while (remaining > 0) {
-      auto it = asks_.begin();
-      while (it != asks_.end() && it->second.empty()) ++it;
-      if (it == asks_.end()) break;
-      if (it->first > taker_price) break;  // best ask above taker's bid: done
-      remaining = ConsumeLevel(taker_id, Side::kBuy, it->first, it->second,
-                               remaining, on_fill);
+    while (remaining > 0 && live_ask_levels_ > 0) {
+      const Price px = best_ask_px_;
+      if (px > taker_price) break;  // best ask above taker's bid: done
+      LevelFIFO& lvl = ask_levels_[Idx(px)];
+      remaining = ConsumeLevel(taker_id, Side::kBuy, px, lvl, remaining,
+                               on_fill);
+      if (lvl.empty()) {
+        MarkLevelEmptied(Side::kSell, px);
+      }
     }
     return remaining;
   }
@@ -339,13 +380,15 @@ class OrderBook {
   template <typename FillHandler>
   Quantity MatchSell(OrderId taker_id, Price taker_price, Quantity remaining,
                      FillHandler& on_fill) {
-    while (remaining > 0) {
-      auto it = bids_.begin();
-      while (it != bids_.end() && it->second.empty()) ++it;
-      if (it == bids_.end()) break;
-      if (it->first < taker_price) break;  // best bid below taker's ask: done
-      remaining = ConsumeLevel(taker_id, Side::kSell, it->first, it->second,
-                               remaining, on_fill);
+    while (remaining > 0 && live_bid_levels_ > 0) {
+      const Price px = best_bid_px_;
+      if (px < taker_price) break;  // best bid below taker's ask: done
+      LevelFIFO& lvl = bid_levels_[Idx(px)];
+      remaining = ConsumeLevel(taker_id, Side::kSell, px, lvl, remaining,
+                               on_fill);
+      if (lvl.empty()) {
+        MarkLevelEmptied(Side::kBuy, px);
+      }
     }
     return remaining;
   }
@@ -382,6 +425,7 @@ class OrderBook {
   }
 
   bool Rest(OrderId id, Side side, Price price, Quantity qty) {
+    if (!InBand(price)) return false;  // outside the ladder band — drop
     Order* o = slab_.Allocate();
     if (o == nullptr) return false;  // slab exhausted — drop the residual
     o->id = id;
@@ -390,20 +434,32 @@ class OrderBook {
     o->side = side;
     o->prev = nullptr;
     o->next = nullptr;
-    if (side == Side::kBuy) {
-      auto [it, _] = bids_.try_emplace(price);
-      PushBackToLevel(it->second, o);
-    } else {
-      auto [it, _] = asks_.try_emplace(price);
-      PushBackToLevel(it->second, o);
+    LevelFIFO& lvl = LevelAt(side, price);
+    const bool was_empty = lvl.empty();
+    PushBackToLevel(lvl, o);
+    if (was_empty) {
+      MarkLevelLive(side, price);
     }
     InsertId(id, o);
     return true;
   }
 
   SlabAllocator<Order> slab_;
-  BidLadder bids_;
-  AskLadder asks_;
+
+  // Direct-indexed price ladder: level i holds price min_price_ + i.
+  // Both sides fully preallocated at construction; no hot-path allocation.
+  Price min_price_;
+  Price max_price_;
+  std::vector<LevelFIFO> bid_levels_;
+  std::vector<LevelFIFO> ask_levels_;
+
+  // Incrementally-maintained touch. `best_*_px_` is meaningful only while
+  // the matching live counter is non-zero.
+  Price best_bid_px_ = 0;
+  Price best_ask_px_ = 0;
+  std::size_t live_bid_levels_ = 0;
+  std::size_t live_ask_levels_ = 0;
+
   std::size_t id_capacity_;
   std::size_t id_mask_;
   std::vector<IdEntry> id_index_;
