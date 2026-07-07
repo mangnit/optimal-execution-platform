@@ -173,7 +173,8 @@ ghost's slice at the crushed mid.
    same inventory re-postable every step (inexhaustible sub-mid ask wall
    pins mid ≈95.5); maker-side fills of resting child asks never credited.
 
-**CURRENT STATE / DECISION (2026-07-07): RL WORKSTREAM FROZEN.** The 9-D
+**CURRENT STATE / DECISION (2026-07-07): RL WORKSTREAM FROZEN — C++ engine
+latency is now the project's primary metric.** The 9-D
 advantage reward is REJECTED and its uncommitted env/reward code REVERTED —
 tree frozen at the κ=1000 8-D milestone (`75902d2` + MTM eval `e57746c`).
 The RL thread closes as a documented negative result: rigorous MTM
@@ -185,6 +186,15 @@ direct-indexed price ladder (std::map is the AddLimit p99 suspect),
 pinned/performance-governor latency baseline with perf counters, CI p99
 regression gate. If the RL thread ever reopens, fix env correctness
 (1)–(3) above FIRST — no reward is trustworthy on the current accounting.
+
+**Systems track progress (2026-07-07, same day):** fused benchmark landed
+(`baf78b9`) and immediately exposed a latent id-index back-shift-deletion
+bug (orphaned hash entries → table saturation → InsertId infinite loop
+under churn) — fixed in `59ed42d` with a 200k-round churn regression test;
+`std::map` price ladder replaced by a direct-indexed array (`13ce3d0`,
+AddLimit 129→52 ns, obs write 165→11 ns under churn; determinism
+byte-identical on all 3 eval seeds). ctest 70/70. The engine, not the
+agent, is now the headline.
 
 ## 2. Current Baseline Metrics (fixed-policy fill ceiling)
 

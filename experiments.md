@@ -322,3 +322,11 @@ exposed the S₀ residual-mark artifact, and the §5 advantage contingency was
 executed and rejected on evidence (endogenous-benchmark spoofing). Remaining
 effort goes to the systems track — fused tick-to-decision benchmark, array
 price ladder, pinned latency baseline. See research_state.md §1f.
+
+**This log is now closed: C++ engine latency is the project's primary
+metric.** Systems milestones (same day): fused benchmark exposed + fixed a
+latent id-index back-shift-deletion bug (`59ed42d`), std::map ladder →
+direct-indexed array (`13ce3d0`), fused tick-to-decision benchmark landed
+(`baf78b9`); ctest 70/70; determinism byte-identical across the swap.
+Latency work is tracked in `docs/current_state.md` and
+`docs/latency_report.md` from here on.

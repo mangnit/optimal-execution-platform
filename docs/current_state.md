@@ -1,5 +1,58 @@
 # Current State
 
+**C++ systems milestones — hash-table bug fix, array price ladder, fused
+benchmark (2026-07-07):** the project's primary metric is now **C++ engine
+latency** (the RL workstream is frozen — see below). Three coupled changes
+landed on `feature/sac-quadratic-terminal-k1000`:
+
+- **Correctness: id-index back-shift deletion bug** (`59ed42d`,
+  [cpp/core/order_book.hpp](cpp/core/order_book.hpp)). The Knuth 6.4-R
+  erase in `LookupAndEraseId` stopped at the first entry sitting on its
+  home slot and moved entries whose home lay inside `(hole, next]` —
+  both defects strand displaced entries behind empty slots: orphaned,
+  unreachable by lookup, never erased. Under sustained insert/erase churn
+  orphans accumulate until the table saturates and `InsertId` (which
+  needs an empty slot to terminate) spins forever. Exposed by the fused
+  hot-path benchmark's sustained workload (a 21-minute 100%-CPU hang,
+  bisected via per-component rdtsc accumulators); invisible to all prior
+  tests/workloads. Fixed with the canonical movability test
+  (`(next−home) mod cap ≥ (next−hole) mod cap`, skip-and-continue) and
+  regression-guarded by `OrderBookTest.IdIndexSurvivesSustainedChurn`
+  (200k churn rounds — fails in seconds on the old code).
+- **Performance: direct-indexed array price ladder** (`13ce3d0`). The
+  `std::map<Price, LevelFIFO>` ladder is replaced by one contiguous
+  `vector<LevelFIFO>` per side over a fixed band ([0, 16383] default,
+  narrowable via ctor), preallocated at construction. Level lookup is a
+  subtract-and-index; the touch is maintained incrementally so
+  `has_bid()/best_bid()` are O(1) reads (previously map-node scans).
+  Churn-workload deltas: AddLimit 129→52 ns, best-bid/ask obs write
+  165→11 ns, `Cross_Sweep` p50 187→74 ns. Out-of-band residuals drop
+  (same policy as slab exhaustion). **Seeded determinism verified
+  byte-identical**: the rebuilt `oep_env` reproduces the committed
+  κ=1000 TWAP numbers to the decimal on all three eval seeds.
+- **Benchmark: fused tick-to-decision** (`baf78b9`,
+  [cpp/benchmarks/fused_hotpath_bench.cpp](cpp/benchmarks/fused_hotpath_bench.cpp)).
+  The §7 headline path measured as one continuous internal-clock op:
+  synthetic arrival → LOB update (+ matching + telemetry emit) → 8-dim
+  obs build → LibTorch `RlPolicy` forward. `BM_Fused_ArrivalToObs`
+  isolates everything but the neural forward. Unpinned WSL2 numbers:
+  arrival→obs p50 **52 ns**; full tick-to-decision p50 **16.8 µs** —
+  ~99.7% of the fused path is the LibTorch forward, i.e. **the book is
+  not the bottleneck, inference is** (and inference runs on the
+  parent-order cadence, per the two-clock model). Gated on
+  `OEP_USE_TORCH`, wired into `scripts/run_benchmarks.sh`.
+
+**Test suite: ctest 70/70** (all prior invariants — price/time priority,
+determinism replay, zero-alloc guards, integration — plus the new churn
+test) under `-Werror`.
+
+**RL workstream: FROZEN at the κ=1000 8-D milestone** (`75902d2` +
+MTM eval `e57746c`). The 9-D dense TWAP-advantage contingency was executed
+and rejected on evidence — the agent learned to bang its own benchmark
+(commit `9c1e266` records the negative result; details in
+`research_state.md` §1f / `experiments.md`). The RL narrative ships as
+"caught two reward-hacks through rigorous mark-to-market accounting."
+
 **RL execution agent — environment realism & reward research (2026-07-06):**
 the SAC optimal-execution agent (P5.4) was filling only 0–3/1000 units. Root
 cause was the **environment, not the hyperparameters**: no resting bid ever
