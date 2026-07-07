@@ -144,6 +144,48 @@ value; TWAP re-run per κ-binary). Full table + traces: `experiments.md` and
   residual mark with the terminal mid, or the §5 dense advantage-vs-TWAP
   reward (9-D obs). Cockpit shows MTM tiles alongside arrival-mid IS.
 
+## 1f. §5 contingency EXECUTED — dense TWAP-advantage + 9-D obs (2026-07-07): HACKED
+
+MTM correction triggered §5. Implemented per spec: ghost TWAP state in
+`py_module.cpp` (Q/T slice at pre-child mid each step), 9-D obs
+(`obs[8]=twap_avg_px/S₀`), reward = `step_agent_bps − step_twap_bps` ONLY
+(φ and κ terms deleted; terminal forced cross kept). `execution_env.py`
+shape=(9,); `RlPolicy::kStateDim`/exporter bumped to 9. Telescoping +
+determinism verified, ctest 69/69. 200k run → `models/adv9d/`,
+`logs/adv9d/eval_seeds.json`. MTM infra committed as `e57746c`
+(libtorch/ gitignored — 786 MB vendored dep).
+
+**Result: worst reward-hack yet — benchmark banging.** Train reward +310;
+eval +236…+304 vs TWAP −78…−102 (same units) while actual execution
+collapsed: fills 226–454/1000, avg_px 96.3–96.5. MTM: TWAP wins 2/3
+(125.8 vs 168.5; 168.4 vs 431.8); agent's 0xC0FFEEBABE "win" (106.8 vs
+113.7) is 693 unexecuted units marked at a healed mid=100.0 — the S₀
+blindness relocated, not cured. Trace (all seeds): t=0–2 sweep bid 99→96
+to crater the mid, then post passively and harvest +11…+14/step from the
+ghost's slice at the crushed mid.
+
+**Root causes (env-design, fix before ANY further reward work):**
+1. benchmark endogenous — ghost executes at agent-impacted mid (needs a
+   counterfactual no-agent book replaying the same seed, or exogenous px);
+2. no opportunity-cost leg — unrealized inventory free (do_nothing probe
+   scored −6…+6 vs twap −78…−102 pre-training: red flag was visible);
+3. resting-inventory accounting — `remaining_` not decremented on rest ⇒
+   same inventory re-postable every step (inexhaustible sub-mid ask wall
+   pins mid ≈95.5); maker-side fills of resting child asks never credited.
+
+**CURRENT STATE / DECISION (2026-07-07): RL WORKSTREAM FROZEN.** The 9-D
+advantage reward is REJECTED and its uncommitted env/reward code REVERTED —
+tree frozen at the κ=1000 8-D milestone (`75902d2` + MTM eval `e57746c`).
+The RL thread closes as a documented negative result: rigorous MTM
+accounting caught two reward-hacks (S₀ residual-mark blindness, then
+endogenous-benchmark banging). Eval artifacts kept: `models/adv9d/`,
+`logs/adv9d/eval_seeds.json` (gitignored). Effort pivots to the systems
+track: fused tick-to-decision benchmark (incl. LibTorch RlPolicy forward),
+direct-indexed price ladder (std::map is the AddLimit p99 suspect),
+pinned/performance-governor latency baseline with perf counters, CI p99
+regression gate. If the RL thread ever reopens, fix env correctness
+(1)–(3) above FIRST — no reward is trustworthy on the current accounting.
+
 ## 2. Current Baseline Metrics (fixed-policy fill ceiling)
 
 Driven straight through built `oep_env.SimEnv` (parent_qty=1000, horizon=32, mid=100,

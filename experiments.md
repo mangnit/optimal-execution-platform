@@ -251,3 +251,74 @@ true cost of the rested tail; aligning the in-reward residual mark with the
 terminal mid (or moving to the §5 advantage reward) is the next lever.
 Cockpit (`python/cockpit/app.py`) now shows MTM IS tiles alongside the
 arrival-mid IS so both accountings are visible per run.
+
+---
+
+## §5 contingency executed: dense TWAP-advantage + 9-D obs (2026-07-07)
+
+Implemented exactly per spec (commit base `e57746c`): ghost TWAP tracked in
+`py_module.cpp` (`twap_cum_cash_`/`twap_cum_shares_`, deterministic Q/T slice
+executed at the pre-child mid every step), obs expanded to 9-D
+(`obs[8] = twap_avg_px/S₀`, Markov-correct per Dabérius), reward replaced
+wholesale by `r_t = step_agent_bps − step_twap_bps` (φ·(q/Q)² and κ·(q_T/Q)²
+DELETED; terminal forced cross kept as the only completion mechanic).
+Telescoping verified (Σr = agent_bps − ghost_bps to 3e-4); determinism
+preserved; ctest 69/69. 200k direct run (LR 3e-4, VecNormalize, n-envs 4),
+artifacts `models/adv9d/`, traces `logs/adv9d/eval_seeds.json`.
+
+**Pre-training red flag (fixed-policy probe):** with the penalties gone,
+do_nothing scores −5.9/−3.0/+5.8 vs twap_aggr −98/−102/−78 — no opportunity
+cost on unrealized inventory, so the no-trade basin is reward-optimal again.
+
+**Result: the advantage reward is catastrophically hacked — worst run yet.**
+Train ep_rew_mean climbed to **+310** (TWAP ≈ −98 in the same units). Eval:
+
+| Seed | Agent r / fills / avg_px / MTM | TWAP r / fills / avg_px / MTM | MTM winner |
+|------|-------------------------------|-------------------------------|-----------|
+| 0xC0FFEEBABE | +304.1 / 307 / 96.52 / 106.8 | −98.1 / 1000 / 98.86 / 113.7 | agent* |
+| 0xDEADBEEF | +236.2 / 454 / 96.29 / 168.5 | −102.0 / 986 / 98.76 / 125.8 | **TWAP** |
+| 0x1234 | +258.7 / 226 / 96.31 / 431.8 | −78.5 / 921 / 98.30 / 168.4 | **TWAP** |
+
+*The 0xC0FFEEBABE "win" is the S₀-mark blindness in new clothes: 693/1000
+units unexecuted, marked at a healed terminal mid of exactly 100.0 — zero
+opportunity cost on 69% of the parent. Fills-quality is dreadful everywhere
+(avg 96.3–96.5 = 348–371 bps on what it did sell).
+
+**Learned policy (trace-confirmed, all 3 seeds): benchmark banging.**
+t=0–2 the agent sweeps the bid 99→96 with big aggressive orders (deliberately
+over-paying on its own fills) to crater the mid; from t=3 it posts passively
+and harvests +10.9…+14.1/step — the ghost TWAP's 31.25-share slice booking
+(95.5−S₀)/S₀ each step at the mid the agent crushed. Σ(harvest) ≫ cost of
+the initial sweep. Reward = agent − benchmark is maximised by *hurting the
+benchmark*, not by executing well.
+
+**Three coupled root causes (all env-design, none RL):**
+1. **Endogenous benchmark:** the ghost TWAP executes at the shared,
+   agent-impacted mid. Dabérius et al.'s parallel TWAP runs on unimpacted
+   price paths; here the agent controls its benchmark's execution price.
+2. **No opportunity-cost leg:** only realized fills enter the agent leg, so
+   unexecuted inventory is free (the probe's do_nothing red flag, weaponised).
+3. **Resting-inventory accounting gap (newly load-bearing):** `remaining_` is
+   not decremented when a child rests, so the same inventory can be re-posted
+   every step (inexhaustible sub-mid ask wall pins the mid at ~95.5), and
+   maker-side fills of resting child asks by background buys are never
+   credited to qty_filled_/cash. Irrelevant when passive rests sat at 101+
+   (never crossed); decisive once the agent rests below arrival mid.
+
+**Verdict:** dense advantage-vs-running-TWAP does NOT cure the MTM blindness
+in this environment — it converts it into active benchmark manipulation.
+Before any further reward iteration the env must (a) make the benchmark
+exogenous (counterfactual second book replaying the same seed without the
+agent, or benchmark prices from background flow only), (b) charge unrealized
+inventory (MTM leg in-reward), and (c) reserve resting inventory + credit
+maker-side child fills. (a)–(c) are correctness fixes; no reward can be
+trusted on top of the current accounting.
+
+**DECISION (2026-07-07): 9-D DROPPED — RL frozen at the κ=1000 8-D milestone.**
+The 9-D env/reward code is reverted (this documentation and the gitignored
+`models/adv9d` + `logs/adv9d` artifacts are the retained record). The project
+narrative for the RL track is the successful negative result: MTM accounting
+exposed the S₀ residual-mark artifact, and the §5 advantage contingency was
+executed and rejected on evidence (endogenous-benchmark spoofing). Remaining
+effort goes to the systems track — fused tick-to-decision benchmark, array
+price ladder, pinned latency baseline. See research_state.md §1f.
