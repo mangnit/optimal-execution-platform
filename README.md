@@ -120,18 +120,75 @@ training bridge), `-DOEP_USE_KDB=ON` (live kdb+ ticker-plant logger).
 `python/cockpit/app.py` is a Streamlit desk-style cockpit that runs
 SAC-vs-TWAP head-to-head with arrival-mid and mark-to-market IS tiles.
 
-## Layout
+## Project structure
+
+Where to look first as a reviewer, and why each piece exists:
 
 ```
-cpp/core/       slab allocator · SPSC ring · order book · TSC clock
-cpp/exec/       CRTP strategies: TWAP, Almgren-Chriss, VWAP, RL (LibTorch)
-cpp/bindings/   pybind11 SimEnv (flat float obs, GIL-released step)
-cpp/benchmarks/ Google Benchmark suite incl. fused tick-to-decision
-cpp/tests/      70 GoogleTests: invariants, determinism, zero-alloc, churn
-python/         Gymnasium env · SB3 SAC training · TorchScript export · cockpit
-q/              kdb+ schema + TCA replay (sequence gaps, landing-lag drift)
-scripts/        benchmark runner · latency-report renderer · p99 CI gate
+cpp/
+├── core/                    ← THE hot path. Read this first.
+│   ├── slab_allocator.hpp     O(1) cache-line-aligned pool; zero hot-path new/delete
+│   ├── order_book.hpp         intrusive LevelFIFO book on a direct-indexed ARRAY
+│   │                          price ladder (O(1) level lookup, O(1) best bid/ask,
+│   │                          O(1) cancel via back-shift-deletion hash index —
+│   │                          the churn bug fix + regression test live here)
+│   ├── spsc_ring.hpp          lock-free bounded SPSC, drop-on-full + drop counter:
+│   │                          the hot path may outrun observers, never block on them
+│   └── tsc_clock.hpp          rdtscp invariant-TSC clock, one-shot calibration
+├── exec/                    ← strategy layer, CRTP (no virtual dispatch on hot path)
+│   ├── strategy.hpp           the CRTP vocabulary all strategies compile through
+│   ├── almgren_chriss.*       sinh urgency schedule, precomputed at construction
+│   ├── twap.* / vwap.*        analytic baselines
+│   ├── rl_policy.*            LibTorch TorchScript inference: preallocated input
+│   │                          tensor + reused interpreter stack, alloc-free steps
+│   └── telemetry_publisher.hpp book ops → TelemetryEvents → SPSC ring, inlined
+├── bindings/py_module.cpp   ← pybind11 SimEnv: flat float32 obs (zero-copy view),
+│                              GIL RELEASED across the entire C++ engine step —
+│                              proven by 4 SubprocVecEnv workers scaling in parallel
+├── main/sim_runner.cpp      ← deterministic seeded synthetic-flow driver (the
+│                              same xorshift flow recipe the RL env uses); wires
+│                              book → publisher → ring → relay → kdb+ end-to-end
+├── external/                ← EXTERNAL clock: EventRelay consumer thread,
+│                              in-memory + live kdb+ IPC loggers
+├── benchmarks/              ← Google Benchmark + rdtscp percentile sampler;
+│                              fused_hotpath_bench.cpp is the headline
+│                              arrival → LOB → obs → LibTorch-decision path
+│                              (this benchmark found the hash-table bug)
+└── tests/                   ← 70 GoogleTests: matching invariants, seeded
+                               determinism (byte-identical fills), zero-alloc
+                               guards via intercepted operator new, id-index
+                               sustained-churn regression, relay/integration
+
+python/
+├── env/execution_env.py     ← Gymnasium wrapper over the C++ SimEnv (no per-step
+│                              Python-side allocation)
+├── train/                   ← SB3 SAC training (SubprocVecEnv + VecNormalize),
+│                              TorchScript actor export for C++ inference
+└── cockpit/app.py           ← Streamlit desk cockpit: SAC vs TWAP head-to-head,
+                               arrival-mid AND mark-to-market IS tiles
+
+scripts/
+├── run_benchmarks.sh          runs the suite, renders docs/latency_report.md
+├── check_latency_regression.py  CI p99 gate vs committed baseline (15% + 15ns)
+└── eval_sweep.py              3-seed RL eval incl. the MTM IS accounting that
+                               exposed the reward-hacks
+
+benchmarks/                  ← committed benchmark JSONs; ci_baseline/ is the
+                               regression-gate reference
+q/                           ← kdb+ ticker-plant schema + TCA replay (sequence
+                               gaps, landing-lag drift between the two clocks)
+docs/                        ← architecture.md (the blueprint) ·
+                               latency_report.md (pinned numbers + PMU counters) ·
+                               current_state.md (running engineering log)
+.github/workflows/ci.yml     ← build → ctest → benchmarks → p99 gate → artifacts
 ```
+
+Research trail: `experiments.md` (per-run log) and `research_state.md`
+(durable state) document the full RL trajectory, including both
+reward-hacks and the decision record. Synthetic background flow is the
+seeded deterministic recipe in `sim_runner.cpp` / `py_module.cpp`; the
+calibrated marked-Hawkes generator from the blueprint (§5.3) is future
+work, not shipped code.
 
 ## Measurement honesty
 
