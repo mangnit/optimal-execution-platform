@@ -141,7 +141,13 @@ class SpscRing {
   // is unavoidable for small T and is not a false-sharing hazard here because
   // the producer and consumer only ever contend at the same slot when the
   // ring is empty, which is precisely when there is no throughput to protect.
-  alignas(kSpscCacheLine) T storage_[Capacity];
+  // Zero-initialized on construction (external clock, one-time cost). Two
+  // reasons: (a) pre-faults every page of the ring so the producer never
+  // takes a first-touch page fault on the hot path, and (b) newer GCC's
+  // -Wmaybe-uninitialized cannot prove TryPop's empty-check guards the
+  // storage read when fully inlined, and -Werror turns that false positive
+  // into a build break.
+  alignas(kSpscCacheLine) T storage_[Capacity] = {};
 };
 
 }  // namespace oep::core
