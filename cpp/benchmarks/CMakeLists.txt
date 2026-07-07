@@ -37,3 +37,16 @@ target_link_libraries(spsc_ring_bench
 add_executable(order_book_bench order_book_bench.cpp)
 target_link_libraries(order_book_bench
   PRIVATE oep_core benchmark::benchmark pthread)
+
+# Fused tick-to-decision benchmark (§7 headline path). Needs the LibTorch
+# RlPolicy, so it is gated exactly like rl_policy_test: absent OEP_USE_TORCH
+# the benchmark suite builds without it and the report simply omits the row.
+if(OEP_USE_TORCH)
+  add_executable(fused_hotpath_bench fused_hotpath_bench.cpp)
+  target_link_libraries(fused_hotpath_bench
+    PRIVATE oep_core oep_exec benchmark::benchmark pthread)
+  # <torch/script.h> is not clean under -Wall -Wextra -Wpedantic -Werror;
+  # scope the same relaxations used for rl_policy.cpp / rl_policy_test.cpp.
+  set_source_files_properties(fused_hotpath_bench.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-sign-compare;-Wno-deprecated-declarations;-Wno-unused-parameter")
+endif()

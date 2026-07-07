@@ -37,10 +37,21 @@ run_one slab_allocator_bench
 run_one spsc_ring_bench
 run_one order_book_bench
 
+inputs=(
+  "$report_dir/slab_allocator_bench.json"
+  "$report_dir/spsc_ring_bench.json"
+  "$report_dir/order_book_bench.json"
+)
+
+# Fused tick-to-decision benchmark is built only when OEP_USE_TORCH=ON;
+# include it in the report when the binary exists.
+if [[ -x "$build_dir/cpp/benchmarks/fused_hotpath_bench" ]]; then
+  run_one fused_hotpath_bench
+  inputs+=("$report_dir/fused_hotpath_bench.json")
+fi
+
 python3 "$repo_root/scripts/render_latency_report.py" \
-  --input "$report_dir/slab_allocator_bench.json" \
-          "$report_dir/spsc_ring_bench.json" \
-          "$report_dir/order_book_bench.json" \
+  --input "${inputs[@]}" \
   --output "$repo_root/docs/latency_report.md"
 
 echo "==> wrote $repo_root/docs/latency_report.md"
