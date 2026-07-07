@@ -69,13 +69,17 @@ constexpr std::size_t kActionDim = 2;
 
 // Reward-shaping constants (namespace scope so the no-trade path and the
 // executed-step path share one definition — TRIAL 2, reward structure).
-//   kPhi                 : inventory holding-penalty coefficient φ in φ·(q/Q)².
-//   kTerminalStressTicks : unsold inventory at episode end is marked-to-
-//     liquidation at (arrival_mid − this), a price strictly worse than the
-//     deepest reachable fill, so under-executing is never cheaper than
-//     completing the parent order.
+//   kPhi   : inventory holding-penalty coefficient φ in φ·(q/Q)².
+//   kKappa : quadratic terminal-inventory penalty −κ·(q_T/Q)² (replaces the
+//     old linear stress cliff, SAC_Reward_Fix_Architecture.md §4). C¹ basin:
+//     marginal cost 2κ·(q_T/Q) → 0 as inventory clears, so the agent stops
+//     over-paying spread on the final units. At κ=1000 the marginal crossover
+//     2κ·x = c_cross sits at x = 5% remaining (engine tick = 1 unit =
+//     100 bps at S₀=100 — re-derive if the price granularity ever changes).
+//     Swept κ ∈ {1000, 1500, 2000}: κ=1000 beats TWAP on 2/3 eval seeds on
+//     both reward and avg fill price (see experiments.md, 2026-07-07).
 constexpr float kPhi = 1.0f;  // TRIAL 3: 0.25→1.0, urgency knob (front-load)
-constexpr double kTerminalStressTicks = 10.0;
+constexpr double kKappa = 1000.0;  // sweep winner (κ=2000/1500 lose 3/3)
 
 // Background-liquidity churn (post-Trial-5 realism fix): a resting synthetic
 // order survives this many steps, then expires. Bounds standing book depth so
@@ -370,19 +374,16 @@ class SimEnv {
     ++step_idx_;
     MaybeCloseOut();
 
-    // TRIAL 2 completion incentive: whatever is still unsold when the episode
-    // ends is marked-to-liquidation at (S₀ − kTerminalStressTicks), a price
-    // strictly worse than the deepest reachable fill. This makes leaving
-    // inventory unexecuted at least as costly as crossing for it, so the
-    // reward-optimal behaviour is to actually complete the parent order.
+    // Smooth quadratic terminal penalty −κ·(q_T/Q)² (replaces the TRIAL 2
+    // linear stress cliff; SAC_Reward_Fix_Architecture.md §4.4). Residual
+    // inventory is marked at S₀ (0 realised bps) so the quadratic is the only
+    // terminal cost — no double counting. ∂r/∂q_T → 0 as q_T → 0, so it is
+    // never reward-optimal to pay a wide spread clearing the last few units.
     if (done_ && remaining_ > 0) {
-      const double stress_px =
-          static_cast<double>(s0) - kTerminalStressTicks;
-      const double stress_bps = (stress_px - static_cast<double>(s0)) /
-                                static_cast<double>(s0) * 1e4 *
-                                static_cast<double>(remaining_) /
-                                static_cast<double>(parent_qty_);
-      reward += static_cast<float>(stress_bps);
+      const double rem_frac = static_cast<double>(remaining_) /
+                              static_cast<double>(parent_qty_);
+      const double quad_penalty_bps = -kKappa * rem_frac * rem_frac;
+      reward += static_cast<float>(quad_penalty_bps);
     }
     return reward;
   }

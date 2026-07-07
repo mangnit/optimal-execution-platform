@@ -75,6 +75,23 @@ class EpisodeResult:
         benchmark = self.parent_qty * self.arrival_mid
         return float((benchmark - proceeds) / benchmark * 1e4)
 
+    @property
+    def mtm_is_bps(self) -> float:
+        """Mark-to-market IS in bps: residual marked at the TERMINAL mid.
+
+        Unlike `is_bps` (residual at arrival mid = zero opportunity cost on
+        the unexecuted tail), this charges the true cost of finishing the
+        horizon with inventory. Matches `mtm_is_bps` in
+        scripts/eval_sweep.py / logs/kappa*/eval_seeds.json.
+        """
+        if self.parent_qty == 0 or self.arrival_mid == 0:
+            return 0.0
+        final_mid = self.records[-1].mid if self.records else self.arrival_mid
+        proceeds = self.total_filled * self.avg_fill_price
+        proceeds += (self.parent_qty - self.total_filled) * final_mid
+        benchmark = self.parent_qty * self.arrival_mid
+        return float((benchmark - proceeds) / benchmark * 1e4)
+
     def to_frame(self) -> pd.DataFrame:
         return pd.DataFrame([r.__dict__ for r in self.records])
 
@@ -312,6 +329,17 @@ def render() -> None:
         "Filled / Parent",
         f"{policy_result.total_filled} / {policy_result.parent_qty}",
         delta=f"avg px {policy_result.avg_fill_price:.3f}",
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(f"{policy} MTM IS (bps)", f"{policy_result.mtm_is_bps:+.2f}")
+    m2.metric("TWAP MTM IS (bps)", f"{twap_result.mtm_is_bps:+.2f}")
+    mtm_delta = policy_result.mtm_is_bps - twap_result.mtm_is_bps
+    m3.metric("Δ MTM vs TWAP (bps)", f"{mtm_delta:+.2f}",
+              delta=f"{-mtm_delta:+.2f}", delta_color="normal")
+    m4.caption(
+        "MTM marks residual at the terminal mid (true opportunity cost); "
+        "IS above marks it at arrival mid."
     )
 
     st.plotly_chart(

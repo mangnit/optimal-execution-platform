@@ -81,6 +81,121 @@ Even TWAP under-fills 0x1234 (921) → learned policy has room to beat it by ada
 size/aggression to book state. Training with churn: run 200k direct (vecnorm saved
 at end); eval `scratchpad/eval_vecnorm.py`, baseline `scratchpad/twap_baseline.py`.
 
+## 1d. Churn training results — 200k vs 500k (KEY: more compute ≠ better)
+
+`train_sac.py` gained a SIGTERM/SIGINT save handler so supervisor early-stop keeps
+model+vecnorm. Commits: `b47e74e` (churn). Agent-vs-TWAP reward/fills per seed:
+
+| Seed | Agent 200k | Agent 500k (early-stop ~167k) | TWAP |
+|------|-----------|-------------------------------|------|
+| 0xC0FFEEBABE | −238.9 / 1000 | −231.4 / 1000 | −124.8 / 1000 |
+| 0xDEADBEEF | −415.2 / 806 | −314.1 / 973 | −147.5 / 986 |
+| 0x1234 (hard) | **−223.3 / 998 (beat TWAP)** | −319.4 / 978 | −247.7 / 921 |
+
+- **200k:** beat TWAP on 0x1234 (only), lost on easy seeds (under-converged sweet spot).
+- **500k:** early-stopped, best ep_rew_mean −201@142k. Converged to **over-aggressive**
+  policy (`aggr` 0.67–0.80, avg fill ~97.1 vs TWAP 98.8). Robustness ↑ (0xDEADBEEF 806→973)
+  but price ↓ everywhere; **LOST 0x1234 edge**. Under-training hypothesis REFUTED.
+- **Root cause / next lever (reward design, NOT compute):** `kTerminalStressTicks=10`
+  (−100bps/unit unfilled) dominates the spread signal → "complete-at-all-costs" over-crossing.
+  Fix = soften/taper terminal penalty + add price-improvement shaping (reward `avg_fill−S₀`),
+  so completion vs execution-quality trade off correctly. THEN re-train.
+- Eval both artifacts: final = `models/{sac_oep_baseline.zip,vecnormalize.pkl}`;
+  best-checkpoint = `logs/eval_best/best_model.zip` (+ same vecnorm). Both lose to TWAP.
+
+**CURRENT STATE:** env is a realistic Almgren-Chriss landscape (churn live, committed).
+Agent executes actively but is over-aggressive; does NOT yet beat TWAP after convergence.
+Reward rebalancing is the open task. → **RESOLVED 2026-07-07, see §1e.**
+
+## 1e. Quadratic terminal penalty — implemented + swept (2026-07-07)
+
+Per `SAC_Reward_Fix_Architecture.md` §4.4: linear cliff (mark at S₀−10,
+−1000 bps/unit-frac) REPLACED by smooth quadratic `−κ·(q_T/Q)²` in
+`py_module.cpp::StepImpl`; residual marked at S₀; `kTerminalStressTicks`
+deleted. Tick scale verified first: touch 99/101, first cross books 99.000 on
+all 3 seeds ⇒ 1 tick = 100 bps, κ-calibration correctly scaled.
+
+Sweep κ ∈ {1000,1500,2000} (200k direct each; κ is constexpr ⇒ rebuild per
+value; TWAP re-run per κ-binary). Full table + traces: `experiments.md` and
+`logs/kappa{K}/eval_seeds.json`; models `models/kappa{K}/`.
+
+- **Over-aggression CURED at all κ** (goal of the fix): smooth inventory
+  decline, no terminal dump, fills at 99/98 only (cliff policy swept 95–97).
+- **κ=1000 BEATS TWAP on 2/3 seeds** on both reward and avg fill:
+  0xC0FFEEBABE −122.0/933/98.879 vs TWAP −124.8/1000/98.863;
+  0xDEADBEEF −126.5/872/98.877 vs TWAP −133.7/986/98.760.
+  First post-convergence TWAP win. Mechanism: skips thin-book steps, rests
+  ~13% tail (quad cost −16.4) instead of forcing completion at 98.
+- **0x1234 (hard) still loses at all κ** (best 195.9 vs 170.0 IS bps).
+  §5 contingency (advantage-vs-running-TWAP, 9-D obs) NOT triggered (needs
+  0/3); it is the next lever for uniform dominance / thin-book adaptation.
+- **Caveat:** reward win marks residual at S₀ (zero opportunity cost on the
+  rested tail). Fills-only price win is real; mark residual at S_end in any
+  production IS decomposition before claiming out-of-sample victory.
+- **Tree state:** `kKappa = 1000.0` kept (winner), built, ctest 69/69.
+  Milestone commit `75902d2` on `feature/sac-quadratic-terminal-k1000`.
+- **MTM CORRECTION (2026-07-07, post-milestone):** `scripts/eval_sweep.py`
+  (now in-repo) gained `mtm_is_bps` — residual marked at TERMINAL mid, not
+  S₀. Result: **TWAP wins 3/3 on MTM IS** (agent/TWAP: 121.3/113.7,
+  129.9/125.8, 203.9/168.4 bps). Terminal mid ≈ 97.5 (the forced terminal
+  cross depresses the mark), so the rested tail costs ~250 bps/unit-frac —
+  the κ=1000 "win" was an artifact of the S₀ residual mark. The §5
+  contingency condition is met in spirit; next lever = align the in-reward
+  residual mark with the terminal mid, or the §5 dense advantage-vs-TWAP
+  reward (9-D obs). Cockpit shows MTM tiles alongside arrival-mid IS.
+
+## 1f. §5 contingency EXECUTED — dense TWAP-advantage + 9-D obs (2026-07-07): HACKED
+
+MTM correction triggered §5. Implemented per spec: ghost TWAP state in
+`py_module.cpp` (Q/T slice at pre-child mid each step), 9-D obs
+(`obs[8]=twap_avg_px/S₀`), reward = `step_agent_bps − step_twap_bps` ONLY
+(φ and κ terms deleted; terminal forced cross kept). `execution_env.py`
+shape=(9,); `RlPolicy::kStateDim`/exporter bumped to 9. Telescoping +
+determinism verified, ctest 69/69. 200k run → `models/adv9d/`,
+`logs/adv9d/eval_seeds.json`. MTM infra committed as `e57746c`
+(libtorch/ gitignored — 786 MB vendored dep).
+
+**Result: worst reward-hack yet — benchmark banging.** Train reward +310;
+eval +236…+304 vs TWAP −78…−102 (same units) while actual execution
+collapsed: fills 226–454/1000, avg_px 96.3–96.5. MTM: TWAP wins 2/3
+(125.8 vs 168.5; 168.4 vs 431.8); agent's 0xC0FFEEBABE "win" (106.8 vs
+113.7) is 693 unexecuted units marked at a healed mid=100.0 — the S₀
+blindness relocated, not cured. Trace (all seeds): t=0–2 sweep bid 99→96
+to crater the mid, then post passively and harvest +11…+14/step from the
+ghost's slice at the crushed mid.
+
+**Root causes (env-design, fix before ANY further reward work):**
+1. benchmark endogenous — ghost executes at agent-impacted mid (needs a
+   counterfactual no-agent book replaying the same seed, or exogenous px);
+2. no opportunity-cost leg — unrealized inventory free (do_nothing probe
+   scored −6…+6 vs twap −78…−102 pre-training: red flag was visible);
+3. resting-inventory accounting — `remaining_` not decremented on rest ⇒
+   same inventory re-postable every step (inexhaustible sub-mid ask wall
+   pins mid ≈95.5); maker-side fills of resting child asks never credited.
+
+**CURRENT STATE / DECISION (2026-07-07): RL WORKSTREAM FROZEN — C++ engine
+latency is now the project's primary metric.** The 9-D
+advantage reward is REJECTED and its uncommitted env/reward code REVERTED —
+tree frozen at the κ=1000 8-D milestone (`75902d2` + MTM eval `e57746c`).
+The RL thread closes as a documented negative result: rigorous MTM
+accounting caught two reward-hacks (S₀ residual-mark blindness, then
+endogenous-benchmark banging). Eval artifacts kept: `models/adv9d/`,
+`logs/adv9d/eval_seeds.json` (gitignored). Effort pivots to the systems
+track: fused tick-to-decision benchmark (incl. LibTorch RlPolicy forward),
+direct-indexed price ladder (std::map is the AddLimit p99 suspect),
+pinned/performance-governor latency baseline with perf counters, CI p99
+regression gate. If the RL thread ever reopens, fix env correctness
+(1)–(3) above FIRST — no reward is trustworthy on the current accounting.
+
+**Systems track progress (2026-07-07, same day):** fused benchmark landed
+(`baf78b9`) and immediately exposed a latent id-index back-shift-deletion
+bug (orphaned hash entries → table saturation → InsertId infinite loop
+under churn) — fixed in `59ed42d` with a 200k-round churn regression test;
+`std::map` price ladder replaced by a direct-indexed array (`13ce3d0`,
+AddLimit 129→52 ns, obs write 165→11 ns under churn; determinism
+byte-identical on all 3 eval seeds). ctest 70/70. The engine, not the
+agent, is now the headline.
+
 ## 2. Current Baseline Metrics (fixed-policy fill ceiling)
 
 Driven straight through built `oep_env.SimEnv` (parent_qty=1000, horizon=32, mid=100,
