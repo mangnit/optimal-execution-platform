@@ -251,10 +251,21 @@ class OrderBook {
   }
 
   // Look up an id and erase its slot. Back-shift deletion (Knuth 6.4-R):
-  // scan forward from the hole, pulling in every entry whose ideal home is
-  // at-or-before the hole, until we hit either an empty slot or an entry
-  // already sitting at its home. Keeps the table tombstone-free so lookup
-  // cost stays bounded.
+  // scan forward through the cluster; an entry is movable into the hole iff
+  // its probe distance from home is >= its distance from the hole, i.e. its
+  // home lies cyclically at-or-before the hole. Unmovable entries (home
+  // strictly after the hole) are skipped and the scan continues to the end
+  // of the cluster. Keeps the table tombstone-free so lookup cost stays
+  // bounded.
+  //
+  // The movability test is load-bearing. An earlier version broke out of
+  // the shift at the first entry sitting on its home slot, which strands
+  // any displaced entries further along the cluster behind the new hole —
+  // orphaned (unreachable by lookup, so never erased). Under sustained
+  // insert/erase churn the orphans accumulate until the table saturates,
+  // and InsertId (which requires an empty slot to terminate) then spins
+  // forever. Found by the fused hot-path benchmark; regression-guarded by
+  // OrderBookTest.IdIndexSurvivesSustainedChurn.
   Order* LookupAndEraseId(OrderId id) noexcept {
     const std::size_t start = MixId(id) & id_mask_;
     std::size_t slot = start;
@@ -269,10 +280,10 @@ class OrderBook {
         std::size_t next = (hole + 1) & id_mask_;
         while (id_index_[next].ptr != nullptr) {
           const std::size_t home = MixId(id_index_[next].id) & id_mask_;
-          const std::size_t dist = (next - home) & id_mask_;
-          if (dist == 0) break;
-          id_index_[hole] = id_index_[next];
-          hole = next;
+          if (((next - home) & id_mask_) >= ((next - hole) & id_mask_)) {
+            id_index_[hole] = id_index_[next];
+            hole = next;
+          }
           next = (next + 1) & id_mask_;
         }
         id_index_[hole] = IdEntry{};

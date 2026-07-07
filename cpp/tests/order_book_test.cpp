@@ -397,4 +397,47 @@ TEST(OrderBook, ReplayingOpsGivesIdenticalFills) {
   }
 }
 
+// -------------------------------------------------------------------------
+// 6. Id-index integrity under sustained insert/erase churn.
+// -------------------------------------------------------------------------
+
+// Regression guard for the back-shift deletion bug found by the fused
+// hot-path benchmark: the erase loop stopped at the first entry sitting on
+// its home slot (instead of skipping unmovable entries and continuing to
+// the cluster end), stranding displaced entries behind the new hole. Those
+// orphans were unreachable by lookup — so Cancel returned false for live
+// orders — and accumulated until the table saturated, at which point
+// InsertId (which needs an empty slot to terminate) spun forever.
+//
+// A small book makes clusters dense so the pattern fires fast: keep a
+// rolling window of live resting orders and churn add+cancel for many
+// rounds. With the bug, a cancel of a live id starts failing within a few
+// hundred rounds; with the fix, every cancel succeeds and the book drains
+// to empty at the end.
+TEST(OrderBook, IdIndexSurvivesSustainedChurn) {
+  constexpr std::size_t kCapacity = 64;      // id table = 128 slots
+  constexpr OrderId kWindow = 32;            // live population (25% load)
+  constexpr OrderId kRounds = 200'000;
+  OrderBook book(kCapacity);
+  std::vector<Fill> fills;
+  FillSink sink{&fills};
+
+  for (OrderId n = 1; n <= kRounds; ++n) {
+    ASSERT_TRUE(book.AddLimit(n, Side::kBuy, /*px=*/100, /*qty=*/1, sink))
+        << "rest failed at round " << n;
+    if (n > kWindow) {
+      ASSERT_TRUE(book.Cancel(n - kWindow))
+          << "live order lost from id index at round " << n;
+    }
+  }
+  EXPECT_TRUE(fills.empty());  // same-side resting flow never crosses
+
+  // Drain the window; every remaining live id must still be reachable.
+  for (OrderId n = kRounds - kWindow + 1; n <= kRounds; ++n) {
+    ASSERT_TRUE(book.Cancel(n)) << "drain failed for id " << n;
+  }
+  EXPECT_EQ(book.open_order_count(), 0u);
+  EXPECT_FALSE(book.has_bid());
+}
+
 }  // namespace
