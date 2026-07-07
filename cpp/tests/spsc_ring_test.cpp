@@ -79,7 +79,7 @@ TEST(SpscRingLayout, WholeStructIsCacheAligned) {
 // ---------------------------------------------------------------------------
 
 TEST(SpscRingFifo, EmptyPopReturnsFalse) {
-  SpscRing<int, 8> ring;
+  SpscRing<int, 8> ring{};
   int out = 42;
   EXPECT_FALSE(ring.TryPop(out));
   EXPECT_EQ(out, 42);  // unchanged
@@ -88,7 +88,7 @@ TEST(SpscRingFifo, EmptyPopReturnsFalse) {
 }
 
 TEST(SpscRingFifo, PushPopSingleValue) {
-  SpscRing<int, 8> ring;
+  SpscRing<int, 8> ring{};
   EXPECT_TRUE(ring.TryPush(7));
   EXPECT_EQ(ring.size_approx(), 1u);
   int out = 0;
@@ -99,7 +99,7 @@ TEST(SpscRingFifo, PushPopSingleValue) {
 
 TEST(SpscRingFifo, PreservesOrderAcrossWraparound) {
   // 10 push/pop rounds through a capacity-8 ring => guaranteed wraparound.
-  SpscRing<int, 8> ring;
+  SpscRing<int, 8> ring{};
   int expect = 0;
   for (int round = 0; round < 32; ++round) {
     for (int i = 0; i < 5; ++i) {
@@ -116,7 +116,7 @@ TEST(SpscRingFifo, PreservesOrderAcrossWraparound) {
 }
 
 TEST(SpscRingFifo, HoldsExactlyCapacityElements) {
-  SpscRing<int, 8> ring;
+  SpscRing<int, 8> ring{};
   for (int i = 0; i < 8; ++i) {
     ASSERT_TRUE(ring.TryPush(i));
   }
@@ -140,7 +140,7 @@ TEST(SpscRingFifo, HoldsExactlyCapacityElements) {
 
 TEST(SpscRingDrops, CounterExactUnderMassiveOverflow) {
   constexpr std::size_t kCap = 16;
-  SpscRing<std::uint32_t, kCap> ring;
+  SpscRing<std::uint32_t, kCap> ring{};
   constexpr std::size_t kAttempts = 10'000;
   std::size_t accepted = 0;
   for (std::size_t i = 0; i < kAttempts; ++i) {
@@ -157,7 +157,7 @@ TEST(SpscRingDrops, ProducerNeverStalls) {
   // Timing-based smoke: with a full ring, N failed pushes in a row must all
   // complete in bounded time. The point is to catch any accidental
   // spin/back-off code path the impl might grow later.
-  SpscRing<int, 4> ring;
+  SpscRing<int, 4> ring{};
   for (int i = 0; i < 4; ++i) {
     ASSERT_TRUE(ring.TryPush(i));
   }
@@ -175,7 +175,7 @@ TEST(SpscRingDrops, DropsDoNotCorruptFifoOfSurvivors) {
   // 8 fresh, pop 8. The pop sequence must be 0..7 followed by 100..107,
   // proving that the dropped writes never smeared into the tail.
   constexpr std::size_t kCap = 8;
-  SpscRing<int, kCap> ring;
+  SpscRing<int, kCap> ring{};
   for (int i = 0; i < static_cast<int>(kCap); ++i) {
     ASSERT_TRUE(ring.TryPush(i));
   }
@@ -204,7 +204,7 @@ TEST(SpscRingDrops, InterleavedPushPopKeepsCounterMonotone) {
   // Alternate near-full states: fill, pop one, push one (ok), push one (dropped)
   // repeated. Verifies the counter only advances on genuine drops.
   constexpr std::size_t kCap = 4;
-  SpscRing<int, kCap> ring;
+  SpscRing<int, kCap> ring{};
   for (int i = 0; i < static_cast<int>(kCap); ++i) {
     ASSERT_TRUE(ring.TryPush(i));
   }
@@ -230,7 +230,7 @@ TEST(SpscRingConcurrent, SlowConsumerNeverBlocksProducer) {
   // produced == received + dropped, and the received sequence is strictly
   // monotonically increasing (proves no reordering across the boundary).
   constexpr std::size_t kCap = 64;
-  SpscRing<std::uint64_t, kCap> ring;
+  SpscRing<std::uint64_t, kCap> ring{};
   constexpr std::uint64_t kTotal = 200'000;
 
   std::atomic<bool> producer_done{false};
@@ -283,7 +283,7 @@ TEST(SpscRingConcurrent, RetryingProducerLosesNothingAndOrdered) {
   // the drop counter (by design — the ring cannot distinguish "will retry"
   // from "gave up"), so we only assert on the delivered stream.
   constexpr std::size_t kCap = 128;
-  SpscRing<std::uint64_t, kCap> ring;
+  SpscRing<std::uint64_t, kCap> ring{};
   constexpr std::uint64_t kTotal = 500'000;
 
   std::atomic<bool> producer_done{false};
