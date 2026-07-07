@@ -1,3 +1,4 @@
+# Build trees & CMake state
 build/
 _deps/
 CMakeCache.txt
@@ -5,6 +6,7 @@ CMakeFiles/
 CMakeUserPresets.json
 compile_commands.json
 
+# Compiled objects & libraries
 *.o
 *.obj
 *.a
@@ -12,17 +14,31 @@ compile_commands.json
 *.so.*
 *.dylib
 
+# Editor / OS noise
 .vscode/
 .idea/
 *.swp
 .DS_Store
 
+# Python caches & virtualenvs
+# NOTE: /env/ is anchored to the repo root on purpose — python/env/ is the
+# Gymnasium wrapper SOURCE directory and must stay tracked.
 __pycache__/
 *.pyc
 .venv/
+/env/
+.pytest_cache/
 
+# Training artifacts (never tracked; benchmarks/ci_baseline/*.json — the
+# committed CI regression reference — is NOT under these paths and stays in)
 models/
 logs/
 
+# Vendored binary drops & archives
 libtorch/
-libtorch-*.zip
+*.zip
+*.tar.gz
+
+# Raw working notes (official docs live in docs/ and the root
+# README.md / experiments.md / research_state.md)
+SAC_Reward_Fix_Architecture.md
