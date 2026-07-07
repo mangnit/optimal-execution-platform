@@ -1,6 +1,6 @@
 {
   "context": {
-    "date": "2026-07-04T20:51:47+05:30",
+    "date": "2026-07-07T19:07:27+05:30",
     "host_name": "LAPTOP-AEPE3M3P",
     "executable": "/home/summa/optimal-execution-platform/build/cpp/benchmarks/spsc_ring_bench",
     "num_cpus": 8,
@@ -32,8 +32,9 @@
         "num_sharing": 8
       }
     ],
-    "load_avg": [0.66,0.47,0.27],
-    "library_build_type": "release"
+    "load_avg": [0.26,0.14,0.23],
+    "library_build_type": "release",
+    "pinned_cpu_producer": "3"
   },
   "benchmarks": [
     {
@@ -45,16 +46,16 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 94146058,
-      "real_time": 3.0777227762423340e+01,
-      "cpu_time": 3.0776919178071161e+01,
+      "iterations": 83650402,
+      "real_time": 3.1431091903168635e+01,
+      "cpu_time": 3.0762628636261663e+01,
       "time_unit": "ns",
-      "max_ns": 4.7266606736910768e+05,
-      "min_ns": 8.6805764332906215e+00,
-      "p50_ns": 1.1574101911054163e+01,
-      "p999_ns": 2.6041729299871864e+01,
-      "p99_ns": 1.7361152866581243e+01,
-      "samples": 9.4146058000000000e+07
+      "max_ns": 1.4867025257889007e+06,
+      "min_ns": 8.6805706410460459e+00,
+      "p50_ns": 1.1574094188061395e+01,
+      "p999_ns": 2.7488473696645812e+01,
+      "p99_ns": 1.8807903055599766e+01,
+      "samples": 8.3650402000000000e+07
     },
     {
       "name": "BM_Spsc_TryPushLoaded",
@@ -65,17 +66,17 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 48450108,
-      "real_time": 7.1152586409097921e+01,
-      "cpu_time": 7.1151218135571540e+01,
+      "iterations": 49544177,
+      "real_time": 6.4481742243922199e+01,
+      "cpu_time": 6.3437909544849227e+01,
       "time_unit": "ns",
-      "dropped": 5.9372000000000000e+05,
-      "max_ns": 6.6349696615309094e+05,
-      "min_ns": 8.6805764332906215e+00,
-      "p50_ns": 3.1828780255398947e+01,
-      "p999_ns": 1.1863454458830516e+02,
-      "p99_ns": 8.5359001594024448e+01,
-      "samples": 4.8450108000000000e+07
+      "dropped": 7.4852900000000000e+05,
+      "max_ns": 8.0545640554581431e+05,
+      "min_ns": 8.6805706410460459e+00,
+      "p50_ns": 1.8807903055599766e+01,
+      "p999_ns": 1.2297475074815232e+02,
+      "p99_ns": 8.6805706410460459e+01,
+      "samples": 4.9544177000000000e+07
     }
   ]
 }
