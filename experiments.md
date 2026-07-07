@@ -223,3 +223,31 @@ production IS decomposition must mark residual at S_end before claiming the
 2/3 win out-of-sample.
 
 **Config kept in tree:** `kKappa = 1000.0` (built + ctest 69/69).
+
+### MTM correction (same day): the 2/3 "win" does NOT survive mark-to-market
+
+`scripts/eval_sweep.py` gained `mtm_is_bps`: residual marked at the TERMINAL
+mid (obs[5] at episode end) instead of implicitly at S₀. Re-eval of κ=1000
+(fresh `logs/kappa1000/eval_seeds.json`):
+
+| Seed | Agent is / mtm (final_mid, rem) | TWAP is / mtm (final_mid, rem) | MTM winner |
+|------|---------------------------------|--------------------------------|-----------|
+| 0xC0FFEEBABE | 112.1 / **121.3** (97.5, 67) | 113.7 / **113.7** (100.0, 0) | **TWAP** |
+| 0xDEADBEEF | 112.3 / **129.9** (97.5, 128) | 124.0 / **125.8** (97.5, 14) | **TWAP** |
+| 0x1234 | 195.9 / **203.9** (97.5, 149) | 170.0 / **168.4** (98.5, 79) | **TWAP** |
+
+The terminal mid sits at ~97.5 (the forced terminal cross sweeps the bid and
+the residual rests as a cheap ask, dragging the mark down), so the rested
+tail costs ~250 bps/unit-fraction at the mark — more than crossing at 99
+would have. Charged that opportunity cost, **TWAP wins 3/3**; the κ=1000
+victory was an artifact of the S₀ residual mark. Margins are thin on
+0xDEADBEEF (129.9 vs 125.8) but the direction is consistent.
+
+**Implication:** under honest MTM accounting the sweep fails on all three
+seeds — i.e. the §5 contingency condition (dense advantage-vs-running-TWAP
+reward + 9-D obs with the running TWAP benchmark in state) is now met in
+spirit. The reward's terminal mark (S₀ + quadratic) does not internalize the
+true cost of the rested tail; aligning the in-reward residual mark with the
+terminal mid (or moving to the §5 advantage reward) is the next lever.
+Cockpit (`python/cockpit/app.py`) now shows MTM IS tiles alongside the
+arrival-mid IS so both accountings are visible per run.

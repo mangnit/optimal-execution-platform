@@ -1,5 +1,21 @@
 # Current State
 
+**RL execution agent — environment realism & reward research (2026-07-06):**
+the SAC optimal-execution agent (P5.4) was filling only 0–3/1000 units. Root
+cause was the **environment, not the hyperparameters**: no resting bid ever
+formed and the child order poisoned the book, capping the fill ceiling at ~1%
+for any policy. Fixed across 5 diverse trials (liquidity, reward structure,
+kPhi, learning rate, obs/reward normalization) plus a background-liquidity
+**churn** pass — the simulation is now a realistic Almgren–Chriss landscape
+(hoard-and-dump is dead; TWAP is the optimal *simple* baseline). Open problem:
+the trained agent executes actively but is **over-aggressive** and does **not
+yet beat TWAP** after convergence — the terminal stress penalty dominates the
+spread/impact signal, so the reward-optimal policy over-crosses. Next step is a
+principled reward redesign (not more compute). **The live source of truth for
+this workstream is `research_state.md` (durable state) and `experiments.md`
+(per-run log) at the repo root — this file is NOT tracking the reward-design
+iteration.** Commits: `35a317c` (5-trial fix), `b47e74e` (liquidity churn).
+
 **Latest tuning pass — training stability (2026-07-05):** three changes
 to stop the supervisor's early-stopping trigger from killing SAC runs
 during transient dips.

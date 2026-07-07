@@ -31,6 +31,26 @@ add_library(oep_exec STATIC
 )
 target_link_libraries(oep_exec PUBLIC oep_core)
 
+# LibTorch RL inference (task P5.6). Off by default so a vanilla
+# `-DOEP_USE_TORCH=OFF` checkout stays fast and CI does not need the
+# ~2 GiB libtorch drop on disk. Turn on with:
+#   -DOEP_USE_TORCH=ON -DCMAKE_PREFIX_PATH=/path/to/libtorch
+# Once enabled, rl_policy.cpp joins the oep_exec library and every
+# consumer (tests, benchmarks, sim_runner) transitively links torch.
+option(OEP_USE_TORCH "Build the LibTorch RL inference module (P5.6)" OFF)
+if(OEP_USE_TORCH)
+  find_package(Torch REQUIRED)
+  target_sources(oep_exec PRIVATE cpp/exec/rl_policy.cpp)
+  target_link_libraries(oep_exec PUBLIC "${TORCH_LIBRARIES}")
+  target_compile_definitions(oep_exec PUBLIC OEP_HAS_TORCH=1)
+  # LibTorch headers pull in a lot of code that trips -Werror under
+  # -Wall -Wextra -Wpedantic (sign-compare, deprecated-decl, unused-parameter).
+  # Scope the relaxation to the single translation unit that actually
+  # includes <torch/script.h>.
+  set_source_files_properties(cpp/exec/rl_policy.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-sign-compare;-Wno-deprecated-declarations;-Wno-unused-parameter")
+endif()
+
 enable_testing()
 add_subdirectory(cpp/tests)
 

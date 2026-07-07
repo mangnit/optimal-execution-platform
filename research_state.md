@@ -133,6 +133,16 @@ value; TWAP re-run per κ-binary). Full table + traces: `experiments.md` and
   rested tail). Fills-only price win is real; mark residual at S_end in any
   production IS decomposition before claiming out-of-sample victory.
 - **Tree state:** `kKappa = 1000.0` kept (winner), built, ctest 69/69.
+  Milestone commit `75902d2` on `feature/sac-quadratic-terminal-k1000`.
+- **MTM CORRECTION (2026-07-07, post-milestone):** `scripts/eval_sweep.py`
+  (now in-repo) gained `mtm_is_bps` — residual marked at TERMINAL mid, not
+  S₀. Result: **TWAP wins 3/3 on MTM IS** (agent/TWAP: 121.3/113.7,
+  129.9/125.8, 203.9/168.4 bps). Terminal mid ≈ 97.5 (the forced terminal
+  cross depresses the mark), so the rested tail costs ~250 bps/unit-frac —
+  the κ=1000 "win" was an artifact of the S₀ residual mark. The §5
+  contingency condition is met in spirit; next lever = align the in-reward
+  residual mark with the terminal mid, or the §5 dense advantage-vs-TWAP
+  reward (9-D obs). Cockpit shows MTM tiles alongside arrival-mid IS.
 
 ## 2. Current Baseline Metrics (fixed-policy fill ceiling)
 

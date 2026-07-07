@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -118,6 +119,18 @@ def main() -> int:
             learning_rate=3e-4,  # TRIAL 4: 1e-4→3e-4 to escape passive basin
             ent_coef="auto",
         )
+
+        # Persist artifacts on early-stop too: the supervisor early-stops via
+        # SIGTERM, which would otherwise kill the trainer before the post-learn
+        # save below runs — losing the VecNormalize stats needed to evaluate.
+        def _save_on_signal(signum, _frame):
+            model.save(str(args.model_path))
+            train_env.save(str(args.model_path.parent / "vecnormalize.pkl"))
+            print(f"[train_sac] signal {signum}: saved model+vecnorm, exiting")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _save_on_signal)
+        signal.signal(signal.SIGINT, _save_on_signal)
 
         # SB3 divides eval_freq by n_envs internally for SubprocVecEnv.
         eval_callback = EvalCallback(
