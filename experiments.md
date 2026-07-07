@@ -80,12 +80,41 @@ all_aggressive −429. Realistic Almgren-Chriss landscape.
 | 0xDEADBEEF | −415.2 / 806 | −147.5 / 986 | TWAP |
 | **0x1234 (hard)** | **−223.3 / 998** | **−247.7 / 921** | **AGENT ✅** |
 
-**Verdict:** Churn forces genuine active execution (`remaining` 1.00→0.02, `aggr≈0.69`) —
+**Verdict (200k):** Churn forces genuine active execution (`remaining` 1.00→0.02, `aggr≈0.69`) —
 hoard-and-dump permanently dead. **The agent beats TWAP on the hard seed 0x1234 on
 both reward and fills.** But it is NOT yet uniformly better: over-crosses on easy
-seeds (avg 97.7 vs TWAP 98.9) and under-fills 0xDEADBEEF (806). Under-trained (200k
-CPU, ep_rew_mean still climbing −452→−216). Next: longer training + φ/reward re-tune
-on the churned env to generalize the aggression across liquidity regimes.
+seeds (avg 97.7 vs TWAP 98.9) and under-fills 0xDEADBEEF (806). Hypothesis: under-trained.
+
+### 500k convergence run (churned env, supervisor + SIGTERM-save)
+
+Ran 500k via the supervisor to test the under-training hypothesis. **Early-stopped
+at ~167k** (ep_rew_mean plateaued, best −201.05 @ step 142208). SIGTERM-save handler
+added to `train_sac.py` so the model+VecNormalize survive early-stop.
+
+Agent (final early-stop model) vs TWAP, per seed:
+
+| Seed | Agent 500k reward / fills | Agent 200k (prior) | TWAP reward / fills | Winner |
+|------|---------------------------|--------------------|---------------------|--------|
+| 0xC0FFEEBABE | −231.4 / 1000 | −238.9 / 1000 | −124.8 / 1000 | TWAP |
+| 0xDEADBEEF | −314.1 / 973 | −415.2 / 806 | −147.5 / 986 | TWAP |
+| 0x1234 (hard) | −319.4 / 978 | **−223.3 / 998** | −247.7 / 921 | **TWAP** |
+
+(best-eval checkpoint @142208 is consistent: −242.7 / −377.9 / −319.1, fills 1000/987/1000 —
+also loses to TWAP on all three.)
+
+**Verdict (500k): the under-training hypothesis is REFUTED. Extended training made the
+agent WORSE, not better.** It converged to an over-aggressive "complete-at-all-costs"
+policy (`aggr`↑ to 0.67–0.80, avg fill ~97.1 vs TWAP 98.8): robustness/completion improved
+(0xDEADBEEF fills 806→973) but price quality degraded across the board, and it **LOST the
+0x1234 edge** (−223→−319, from beating TWAP to losing). The 200k "win" was an under-converged
+sweet spot, not a stable optimum.
+
+**Root cause (the real next lever — NOT more compute):** the terminal stress penalty
+(`kTerminalStressTicks=10` ⇒ −100 bps/unit unfilled) dominates the spread/impact signal, so
+the reward-optimal policy is "cross hard to never leave inventory" — which over-pays spread.
+To beat TWAP the reward must be rebalanced: soften/quadratic-taper the terminal penalty, and/or
+add explicit price-improvement shaping (reward `avg_fill − S₀` progress), so completion and
+execution *quality* trade off correctly. This is a reward-design problem, not a step-count one.
 | 5 | Normalization | `VecNormalize(norm_obs=True, norm_reward=True, clip_obs=10)` on train; frozen shared-stats eval; persist `vecnormalize.pkl` (run direct, not via supervisor, to survive the post-`learn()` save) | −131.8 / −126.6 (2 seeds); −603 (0x1234) | **1000/1000** (2/3); 467 on 0x1234 | **Escapes the passive basin — active execution learned.** `remaining` now declines mid-episode (1.00→0.13; `size≈0.52, aggr≈0.46`) instead of flat-at-1.00. Completes 1000/1000 on 2/3 seeds at avg ~98.9 (IS ~110 bps). Confirms the T3/T4 diagnosis (blocker = reward/obs conditioning). Residual: under-fills hardest seed (cross-seed robustness), and raw reward ≈ patient because active crossing walks the book down slightly. |
 
 ---
@@ -126,3 +155,71 @@ unambiguous well before then, and the supervisor's plateau early-stop was
 observed to cut degenerate configs. Reward magnitudes are NOT comparable across
 trials that change the reward function (T2, T3) or normalize it (T5); the
 decision metrics are trained-policy **fills** and **avg_fill vs S₀**.
+
+---
+
+## Quadratic terminal penalty + κ sweep (2026-07-07)
+
+Per `SAC_Reward_Fix_Architecture.md`: replaced the linear terminal cliff
+(mark unsold at S₀−10 ⇒ −1000 bps/unit-fraction, constant marginal cost) with
+a smooth quadratic terminal penalty `−κ·(q_T/Q)²` in
+`py_module.cpp::StepImpl`; residual is now marked at S₀ (0 realised bps), the
+quadratic is the only terminal cost. `kTerminalStressTicks` deleted.
+
+**Tick-scale verification (pre-change):** touch after first bg-flow step =
+99/101 around S₀=100 on the eval seeds; first aggressive cross books exactly
+99.000 on ALL 3 seeds ⇒ c_cross = 100 bps/share, 1 tick = 100 bps. κ=2000
+calibration confirmed correctly scaled. Full-order sweep walks to ~95.4–96.0
+(≈400–456 bps) — the pathology itself.
+
+**Sweep:** κ ∈ {1000, 1500, 2000}, one 200k direct run each (train seed
+0xC0FFEEBABE, LR 3e-4, VecNormalize, n-envs 4), deterministic eval + TWAP
+baseline through the SAME κ-binary per seed. Artifacts
+`models/kappa{K}/{sac.zip,vecnormalize.pkl}`, traces
+`logs/kappa{K}/eval_seeds.json`. IS = fills-only (S₀−avg_fill)/S₀ bps.
+
+| κ | Seed | Agent r / fills / avg_px / IS | TWAP r / fills / avg_px / IS | Winner |
+|---|------|-------------------------------|------------------------------|--------|
+| 1000 | 0xC0FFEEBABE | **−122.0** / 933 / **98.879** / 112.1 | −124.8 / 1000 / 98.863 / 113.7 | **AGENT ✅** |
+| 1000 | 0xDEADBEEF | **−126.5** / 872 / **98.877** / 112.3 | −133.7 / 986 / 98.760 / 124.0 | **AGENT ✅** |
+| 1000 | 0x1234 | −203.5 / 851 / 98.041 / 195.9 | −174.9 / 921 / 98.300 / 170.0 | TWAP |
+| 1500 | 0xC0FFEEBABE | −144.4 / 902 / 98.696 / 130.4 | −124.8 / 1000 / 98.863 | TWAP |
+| 1500 | 0xDEADBEEF | −154.9 / 942 / 98.548 / 145.2 | −133.8 / 986 / 98.760 | TWAP |
+| 1500 | 0x1234 | −234.5 / 895 / 97.763 / 223.7 | −178.1 / 921 / 98.300 | TWAP |
+| 2000 | 0xC0FFEEBABE | −134.2 / 1000 / 98.771 / 122.9 | −124.8 / 1000 / 98.863 | TWAP |
+| 2000 | 0xDEADBEEF | −151.7 / 998 / 98.598 / 140.2 | −133.9 / 986 / 98.760 | TWAP |
+| 2000 | 0x1234 | −245.8 / 804 / 98.097 / 190.3 | −181.2 / 921 / 98.300 | TWAP |
+
+(TWAP reward varies slightly with κ via its own unfilled residual — it is
+re-run per κ-binary for comparability. Old cliff-era TWAP numbers are NOT
+comparable.)
+
+**Verdict:**
+1. **Tail over-aggression is CURED at every κ.** 0xDEADBEEF traces: inventory
+   declines smoothly (κ=1000: 1.00→0.13, no terminal dump; κ=2000: 1.00→0.00
+   near-linear), tail sizes ≤0.35, fills book at 99/98 only — never the
+   95–97 sweeps of the cliff policy (avg 97.1). The critic no longer
+   propagates terminal dread; behaviour is AC-like.
+2. **κ=1000 BEATS TWAP on 2/3 seeds** (0xC0FFEEBABE and 0xDEADBEEF) on BOTH
+   total reward and avg fill price — first configuration to beat TWAP after
+   convergence. On 0xDEADBEEF it selectively skips thin-book steps (rests when
+   the touch is weak, fills at 99 nearly everywhere, only 3 steps at 98 vs
+   TWAP's 6) and rests 128 units at T (quad cost only −16.4) instead of
+   paying spread to force completion.
+3. **κ monotonically trades completion vs price**, as the indifference math
+   predicts: κ=2000 → near-full completion (1000/998) at more 98-fills;
+   κ=1000 → rests ~7–13% tail at better prices. κ=1500 middle, no win.
+4. **0x1234 (hard/illiquid seed) still loses at every κ** (best 190.3 vs
+   TWAP 170.0 bps). Even TWAP under-fills it (921). Residual weakness is
+   liquidity-adaptation on thin books — relative-value-flavoured, but §5's
+   contingency (dense advantage-vs-running-TWAP, 9-D obs) triggers only on
+   0/3 wins; at 2/3 wins it does NOT trigger. It remains the documented next
+   lever if uniform dominance is required.
+
+**Caveat (honest accounting):** the κ=1000 reward win banks on residual being
+marked at S₀ + quadratic — i.e. zero opportunity cost on ~13% unfilled. The
+fills-only avg-price win (98.877 vs 98.760 on 0xDEADBEEF) is real, but a
+production IS decomposition must mark residual at S_end before claiming the
+2/3 win out-of-sample.
+
+**Config kept in tree:** `kKappa = 1000.0` (built + ctest 69/69).

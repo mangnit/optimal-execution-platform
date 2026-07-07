@@ -81,6 +81,59 @@ Even TWAP under-fills 0x1234 (921) → learned policy has room to beat it by ada
 size/aggression to book state. Training with churn: run 200k direct (vecnorm saved
 at end); eval `scratchpad/eval_vecnorm.py`, baseline `scratchpad/twap_baseline.py`.
 
+## 1d. Churn training results — 200k vs 500k (KEY: more compute ≠ better)
+
+`train_sac.py` gained a SIGTERM/SIGINT save handler so supervisor early-stop keeps
+model+vecnorm. Commits: `b47e74e` (churn). Agent-vs-TWAP reward/fills per seed:
+
+| Seed | Agent 200k | Agent 500k (early-stop ~167k) | TWAP |
+|------|-----------|-------------------------------|------|
+| 0xC0FFEEBABE | −238.9 / 1000 | −231.4 / 1000 | −124.8 / 1000 |
+| 0xDEADBEEF | −415.2 / 806 | −314.1 / 973 | −147.5 / 986 |
+| 0x1234 (hard) | **−223.3 / 998 (beat TWAP)** | −319.4 / 978 | −247.7 / 921 |
+
+- **200k:** beat TWAP on 0x1234 (only), lost on easy seeds (under-converged sweet spot).
+- **500k:** early-stopped, best ep_rew_mean −201@142k. Converged to **over-aggressive**
+  policy (`aggr` 0.67–0.80, avg fill ~97.1 vs TWAP 98.8). Robustness ↑ (0xDEADBEEF 806→973)
+  but price ↓ everywhere; **LOST 0x1234 edge**. Under-training hypothesis REFUTED.
+- **Root cause / next lever (reward design, NOT compute):** `kTerminalStressTicks=10`
+  (−100bps/unit unfilled) dominates the spread signal → "complete-at-all-costs" over-crossing.
+  Fix = soften/taper terminal penalty + add price-improvement shaping (reward `avg_fill−S₀`),
+  so completion vs execution-quality trade off correctly. THEN re-train.
+- Eval both artifacts: final = `models/{sac_oep_baseline.zip,vecnormalize.pkl}`;
+  best-checkpoint = `logs/eval_best/best_model.zip` (+ same vecnorm). Both lose to TWAP.
+
+**CURRENT STATE:** env is a realistic Almgren-Chriss landscape (churn live, committed).
+Agent executes actively but is over-aggressive; does NOT yet beat TWAP after convergence.
+Reward rebalancing is the open task. → **RESOLVED 2026-07-07, see §1e.**
+
+## 1e. Quadratic terminal penalty — implemented + swept (2026-07-07)
+
+Per `SAC_Reward_Fix_Architecture.md` §4.4: linear cliff (mark at S₀−10,
+−1000 bps/unit-frac) REPLACED by smooth quadratic `−κ·(q_T/Q)²` in
+`py_module.cpp::StepImpl`; residual marked at S₀; `kTerminalStressTicks`
+deleted. Tick scale verified first: touch 99/101, first cross books 99.000 on
+all 3 seeds ⇒ 1 tick = 100 bps, κ-calibration correctly scaled.
+
+Sweep κ ∈ {1000,1500,2000} (200k direct each; κ is constexpr ⇒ rebuild per
+value; TWAP re-run per κ-binary). Full table + traces: `experiments.md` and
+`logs/kappa{K}/eval_seeds.json`; models `models/kappa{K}/`.
+
+- **Over-aggression CURED at all κ** (goal of the fix): smooth inventory
+  decline, no terminal dump, fills at 99/98 only (cliff policy swept 95–97).
+- **κ=1000 BEATS TWAP on 2/3 seeds** on both reward and avg fill:
+  0xC0FFEEBABE −122.0/933/98.879 vs TWAP −124.8/1000/98.863;
+  0xDEADBEEF −126.5/872/98.877 vs TWAP −133.7/986/98.760.
+  First post-convergence TWAP win. Mechanism: skips thin-book steps, rests
+  ~13% tail (quad cost −16.4) instead of forcing completion at 98.
+- **0x1234 (hard) still loses at all κ** (best 195.9 vs 170.0 IS bps).
+  §5 contingency (advantage-vs-running-TWAP, 9-D obs) NOT triggered (needs
+  0/3); it is the next lever for uniform dominance / thin-book adaptation.
+- **Caveat:** reward win marks residual at S₀ (zero opportunity cost on the
+  rested tail). Fills-only price win is real; mark residual at S_end in any
+  production IS decomposition before claiming out-of-sample victory.
+- **Tree state:** `kKappa = 1000.0` kept (winner), built, ctest 69/69.
+
 ## 2. Current Baseline Metrics (fixed-policy fill ceiling)
 
 Driven straight through built `oep_env.SimEnv` (parent_qty=1000, horizon=32, mid=100,
