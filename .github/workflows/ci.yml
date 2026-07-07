@@ -49,6 +49,25 @@ jobs:
       - name: Run latency benchmarks
         run: scripts/run_benchmarks.sh
 
+      # p99 regression gate: compares the fresh JSON in benchmarks/ against
+      # the committed reference in benchmarks/ci_baseline/. The committed
+      # baseline was captured on a pinned dev box, so on GitHub's shared
+      # runners the gate runs in advisory mode (host_name mismatch reports
+      # but never fails). To arm it strictly: download the benchmark-json
+      # artifact from a trusted run on this runner class, commit those files
+      # to benchmarks/ci_baseline/, and drop --advisory-on-host-mismatch.
+      # The fused (LibTorch) benchmark is gated only on torch-enabled local
+      # boxes — CI builds without OEP_USE_TORCH, so it is absent here.
+      - name: Latency p99 regression gate
+        run: |
+          for b in order_book_bench spsc_ring_bench slab_allocator_bench; do
+            python3 scripts/check_latency_regression.py \
+              "benchmarks/ci_baseline/${b}.json" \
+              "benchmarks/${b}.json" \
+              --tol-pct 0.15 --tol-abs-ns 15 \
+              --advisory-on-host-mismatch
+          done
+
       - name: Upload latency report
         if: always()
         uses: actions/upload-artifact@v4
